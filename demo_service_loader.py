@@ -14,8 +14,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from service_loader import ServiceConfig, ServiceLoader, ServiceState
-from vram_tracker import query_vram_used_gb
+from service_loader import ServiceConfig, ServiceLoader, ServiceState, query_vram_used_gb
 
 logging.basicConfig(
     level=logging.INFO,

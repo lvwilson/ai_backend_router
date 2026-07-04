@@ -6,10 +6,10 @@ Manages a single backend process (llama.cpp, CrispASR, ComfyUI) with:
   • State machine (IDLE → STARTING → RUNNING → STOPPING → DEAD)
   • Process group signals (SIGTERM/SIGKILL via os.setsid)
   • Async context manager support
+  • VRAM delta measurement and drift warnings
 
 Delegates to injected subsystems:
   • HealthChecker  — health probing (HTTP or socket)
-  • VramTracker    — VRAM delta measurement and drift warnings
 
 Designed to be instantiated per-model by a larger orchestrator.
 
@@ -37,13 +37,46 @@ import os
 import signal
 import time
 from dataclasses import dataclass, field
-from health_checker import HealthCheckConfig, HealthChecker
-from vram_tracker import VramTracker
 from typing import Any, Callable, Coroutine
+
+from health_checker import HealthCheckConfig, HealthChecker
 
 EventCallback = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 
 logger = logging.getLogger(__name__)
+
+
+# ── VRAM helpers ───────────────────────────────────────────────────────────
+
+VRAM_DRIFT_THRESHOLD_GB = 2.0       # Warn if actual differs from expected by >2 GB
+VRAM_DRIFT_WARN_INTERVAL = 300.0    # Seconds between drift warnings (5 min)
+
+
+async def query_vram_used_gb() -> float | None:
+    """
+    Query total VRAM used (across all GPUs) via nvidia-smi.
+
+    Returns VRAM in GB, or None if nvidia-smi is unavailable.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi",
+            "--query-gpu=memory.used",
+            "--format=csv,noheader,nounits",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return None
+        total_mi = 0.0
+        for line in stdout.decode().strip().splitlines():
+            line = line.strip()
+            if line:
+                total_mi += float(line)
+        return total_mi / 1024.0
+    except FileNotFoundError:
+        return None
 
 
 # ── State machine ──────────────────────────────────────────────────────────
@@ -101,13 +134,6 @@ class ServiceConfig:
         """Build a HealthChecker from this service config."""
         return HealthChecker(self.health_check_config())
 
-    def vram_tracker(self) -> VramTracker:
-        """Build a VramTracker from this service config."""
-        return VramTracker(
-            service_name=self.name,
-            expected_vram_gb=self.expected_vram_gb,
-        )
-
     @property
     def health_url(self) -> str:
         """Build the full health check URL from config."""
@@ -127,7 +153,6 @@ class ServiceLoader:
 
     Subsystems are injected (or auto-created from config):
       • health_checker  — probes the health endpoint
-      • vram_tracker    — measures VRAM delta and drift
     """
 
     def __init__(
@@ -135,7 +160,6 @@ class ServiceLoader:
         config: ServiceConfig,
         event_callback: EventCallback | None = None,
         health_checker: HealthChecker | None = None,
-        vram_tracker: VramTracker | None = None,
     ):
         self.config = config
         self._state = ServiceState.IDLE
@@ -143,9 +167,13 @@ class ServiceLoader:
         self._started_at: float | None = None
         self._event_callback = event_callback
 
-        # Injected subsystems (auto-create from config if not provided)
+        # Injected subsystem (auto-created from config if not provided)
         self.health_checker = health_checker or config.health_checker()
-        self.vram_tracker = vram_tracker or config.vram_tracker()
+
+        # VRAM tracking state
+        self._vram_before_start: float | None = None
+        self._actual_vram_gb: float | None = None
+        self._vram_drift_warned_at: float | None = None
 
     # ── Internal helpers ─────────────────────────────────────────────────
 
@@ -156,6 +184,61 @@ class ServiceLoader:
                 await self._event_callback(name, payload or {})
             except Exception as exc:
                 logger.debug("[%s] Event callback error for '%s': %s", self.config.name, name, exc)
+
+    # ── VRAM tracking ────────────────────────────────────────────────────
+
+    async def record_pre_start_vram(self) -> None:
+        """Capture VRAM usage before the service process is launched."""
+        self._vram_before_start = await query_vram_used_gb()
+        self._actual_vram_gb = None
+
+    async def measure_vram_delta(self) -> float | None:
+        """Measure VRAM delta since pre-start snapshot."""
+        if self._vram_before_start is None:
+            return None
+        current = await query_vram_used_gb()
+        if current is None:
+            return None
+        delta = current - self._vram_before_start
+        self._actual_vram_gb = round(delta, 2)
+        return self._actual_vram_gb
+
+    async def check_vram_drift(self) -> None:
+        """Compare measured VRAM against expected and emit a drift warning if diverged."""
+        if self._actual_vram_gb is None:
+            return
+        expected = self.config.expected_vram_gb
+        if expected <= 0:
+            return
+        drift = abs(self._actual_vram_gb - expected)
+        if drift <= VRAM_DRIFT_THRESHOLD_GB:
+            return
+        now = time.monotonic()
+        if self._vram_drift_warned_at is not None and (now - self._vram_drift_warned_at) < VRAM_DRIFT_WARN_INTERVAL:
+            return
+        self._vram_drift_warned_at = now
+        await self._emit(
+            "resource_warning",
+            {
+                "type": "vram_drift",
+                "expected_gb": expected,
+                "actual_gb": self._actual_vram_gb,
+                "delta_gb": round(drift, 2),
+            },
+        )
+        logger.warning(
+            "[%s] VRAM drift — expected %.1f GB, measured %.2f GB (%.2f GB off)",
+            self.config.name,
+            expected,
+            self._actual_vram_gb,
+            drift,
+        )
+
+    def reset_vram_tracking(self) -> None:
+        """Reset VRAM tracking state for a restart."""
+        self._vram_before_start = None
+        self._actual_vram_gb = None
+        self._vram_drift_warned_at = None
 
     # ── Public state ─────────────────────────────────────────────────────
 
@@ -179,7 +262,7 @@ class ServiceLoader:
     @property
     def actual_vram_gb(self) -> float | None:
         """Measured VRAM delta attributable to this service, or None."""
-        return self.vram_tracker.actual_vram_gb
+        return self._actual_vram_gb
 
     @property
     def health_url(self) -> str:
@@ -199,10 +282,10 @@ class ServiceLoader:
 
         self._state = ServiceState.STARTING
         self._started_at = None
-        self.vram_tracker.reset()
+        self.reset_vram_tracking()
 
         # Measure VRAM before launch
-        await self.vram_tracker.record_pre_start()
+        await self.record_pre_start_vram()
 
         # Build environment
         env = os.environ.copy()
@@ -235,8 +318,8 @@ class ServiceLoader:
 
             if healthy:
                 self._state = ServiceState.RUNNING
-                await self.vram_tracker.measure_delta()
-                await self.vram_tracker.check_drift(self._emit)
+                await self.measure_vram_delta()
+                await self.check_vram_drift()
                 await self._emit("started", {"pid": self._process.pid})
                 logger.info("[%s] Service is healthy and running", self.config.name)
                 return True
@@ -335,7 +418,7 @@ class ServiceLoader:
             "health_url": self.health_url,
             "expected_vram_gb": self.config.expected_vram_gb,
             "expected_ram_gb": self.config.expected_ram_gb,
-            "actual_vram_gb": self.vram_tracker.actual_vram_gb,
+            "actual_vram_gb": self.actual_vram_gb,
             "started_at": self._started_at,
         }
 
