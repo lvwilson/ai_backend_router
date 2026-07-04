@@ -10,7 +10,6 @@ Manages a single backend process (llama.cpp, CrispASR, ComfyUI) with:
 Delegates to injected subsystems:
   • HealthChecker  — health probing (HTTP or socket)
   • VramTracker    — VRAM delta measurement and drift warnings
-  • EventDispatcher — lifecycle event emission
 
 Designed to be instantiated per-model by a larger orchestrator.
 
@@ -38,11 +37,11 @@ import os
 import signal
 import time
 from dataclasses import dataclass, field
-from typing import Any
-
-from events import EventCallback, EventDispatcher
 from health_checker import HealthCheckConfig, HealthChecker
 from vram_tracker import VramTracker
+from typing import Any, Callable, Coroutine
+
+EventCallback = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +128,6 @@ class ServiceLoader:
     Subsystems are injected (or auto-created from config):
       • health_checker  — probes the health endpoint
       • vram_tracker    — measures VRAM delta and drift
-      • event_dispatcher — emits lifecycle events
     """
 
     def __init__(
@@ -143,14 +141,21 @@ class ServiceLoader:
         self._state = ServiceState.IDLE
         self._process: asyncio.subprocess.Process | None = None
         self._started_at: float | None = None
+        self._event_callback = event_callback
 
         # Injected subsystems (auto-create from config if not provided)
         self.health_checker = health_checker or config.health_checker()
         self.vram_tracker = vram_tracker or config.vram_tracker()
-        self.event_dispatcher = EventDispatcher(
-            callback=event_callback,
-            service_name=config.name,
-        )
+
+    # ── Internal helpers ─────────────────────────────────────────────────
+
+    async def _emit(self, name: str, payload: dict[str, Any] | None = None) -> None:
+        """Emit a lifecycle event if a callback is registered."""
+        if self._event_callback is not None:
+            try:
+                await self._event_callback(name, payload or {})
+            except Exception as exc:
+                logger.debug("[%s] Event callback error for '%s': %s", self.config.name, name, exc)
 
     # ── Public state ─────────────────────────────────────────────────────
 
@@ -231,21 +236,21 @@ class ServiceLoader:
             if healthy:
                 self._state = ServiceState.RUNNING
                 await self.vram_tracker.measure_delta()
-                await self.vram_tracker.check_drift(self.event_dispatcher.emit)
-                await self.event_dispatcher.emit("started", {"pid": self._process.pid})
+                await self.vram_tracker.check_drift(self._emit)
+                await self._emit("started", {"pid": self._process.pid})
                 logger.info("[%s] Service is healthy and running", self.config.name)
                 return True
             else:
                 self._state = ServiceState.DEAD
                 await self._cleanup_process()
-                await self.event_dispatcher.emit("unhealthy", {"reason": "health_check_failed_on_start"})
+                await self._emit("unhealthy", {"reason": "health_check_failed_on_start"})
                 logger.warning("[%s] Service failed health check on start", self.config.name)
                 return False
 
         except Exception as exc:
             self._state = ServiceState.DEAD
             await self._cleanup_process()
-            await self.event_dispatcher.emit("unhealthy", {"reason": str(exc)})
+            await self._emit("unhealthy", {"reason": str(exc)})
             logger.error("[%s] Failed to start: %s", self.config.name, exc)
             return False
 
@@ -260,12 +265,12 @@ class ServiceLoader:
             return True
 
         self._state = ServiceState.STOPPING
-        await self.event_dispatcher.emit("stopping", {})
+        await self._emit("stopping", {})
 
         proc = self._process
         if proc is None or proc.returncode is not None:
             self._state = ServiceState.DEAD
-            await self.event_dispatcher.emit("stopped", {"clean": True})
+            await self._emit("stopped", {"clean": True})
             return True
 
         # Send SIGTERM to the process group
@@ -275,14 +280,14 @@ class ServiceLoader:
         except ProcessLookupError:
             logger.info("[%s] Process %d already exited", self.config.name, proc.pid)
             self._state = ServiceState.DEAD
-            await self.event_dispatcher.emit("stopped", {"clean": True})
+            await self._emit("stopped", {"clean": True})
             return True
 
         # Wait for graceful exit
         try:
             await asyncio.wait_for(proc.wait(), timeout=self.config.stop_timeout)
             self._state = ServiceState.DEAD
-            await self.event_dispatcher.emit("stopped", {"clean": True})
+            await self._emit("stopped", {"clean": True})
             logger.info("[%s] Stopped gracefully (exit code %d)", self.config.name, proc.returncode)
             return True
         except asyncio.TimeoutError:
@@ -334,7 +339,7 @@ class ServiceLoader:
             "started_at": self._started_at,
         }
 
-    # ── Internal helpers ─────────────────────────────────────────────────
+    # ── Private helpers ──────────────────────────────────────────────────
 
     async def _force_kill(self) -> bool:
         """Send SIGKILL to the process group and wait for exit."""
@@ -348,18 +353,18 @@ class ServiceLoader:
             logger.info("[%s] Sent SIGKILL to PID %d", self.config.name, proc.pid)
         except ProcessLookupError:
             self._state = ServiceState.DEAD
-            await self.event_dispatcher.emit("killed", {"clean": False})
+            await self._emit("killed", {"clean": False})
             return True
 
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
             self._state = ServiceState.DEAD
-            await self.event_dispatcher.emit("killed", {"clean": False})
+            await self._emit("killed", {"clean": False})
             logger.info("[%s] Killed (exit code %d)", self.config.name, proc.returncode)
             return True
         except asyncio.TimeoutError:
             self._state = ServiceState.DEAD
-            await self.event_dispatcher.emit("killed", {"clean": False, "force": True})
+            await self._emit("killed", {"clean": False, "force": True})
             logger.error("[%s] Process %d did not exit after SIGKILL", self.config.name, proc.pid)
             return False
 
