@@ -115,6 +115,9 @@ class ServiceConfig:
     # Graceful shutdown
     stop_timeout: float = 10.0                   # Seconds to wait after SIGTERM before SIGKILL
 
+    # Launch retries (total attempts = 1 + retries)
+    retries: int = 1                             # Extra launch attempts on failure
+
 
 
 
