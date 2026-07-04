@@ -68,15 +68,27 @@ class Orchestrator:
             c.name: ServiceLoader(c, event_callback=event_callback) for c in configs
         }
         self._lock = asyncio.Lock()  # Serializes ensure_running / eviction decisions
+        # Extra VRAM attributed beyond the process itself — e.g. the model a
+        # warm ComfyUI instance currently holds resident (loaded on demand).
+        self._extra_vram: dict[str, float] = {}
 
     # ── VRAM accounting ──────────────────────────────────────────────────
 
-    @staticmethod
-    def _tracked_vram(loader: ServiceLoader) -> float:
-        """VRAM attributed to a service: measured if available, else declared."""
+    def _tracked_vram(self, loader: ServiceLoader) -> float:
+        """VRAM attributed to a service: measured if available, else declared,
+        plus any on-demand model VRAM (ComfyUI)."""
         if loader.actual_vram_gb is not None and loader.actual_vram_gb > 0:
-            return loader.actual_vram_gb
-        return loader.config.expected_vram_gb
+            base = loader.actual_vram_gb
+        else:
+            base = loader.config.expected_vram_gb
+        return base + self._extra_vram.get(loader.config.name, 0.0)
+
+    def note_extra_vram(self, name: str, gb: float) -> None:
+        """
+        Record on-demand model VRAM held by a running backend (ComfyUI keeps
+        the most recently used model resident; we track that one).
+        """
+        self._extra_vram[name] = gb
 
     def _running(self) -> list[ServiceLoader]:
         return [s for s in self.services.values() if s.is_alive]
@@ -94,10 +106,17 @@ class Orchestrator:
 
     # ── Core workflow ────────────────────────────────────────────────────
 
-    async def ensure_running(self, name: str) -> ServiceLoader:
+    async def ensure_running(self, name: str, extra_vram_gb: float = 0.0) -> ServiceLoader:
         """
         Guarantee the named backend is running and healthy, evicting others
         if VRAM pressure demands it. Returns its ServiceLoader.
+
+        Args:
+            extra_vram_gb: On-demand model VRAM required beyond the process
+                itself (ComfyUI per-model budgets). If the backend is already
+                warm but the requested model needs more than what's currently
+                attributed, room is made for the increase. The caller should
+                call note_extra_vram(name, gb) once the model is loaded.
 
         Raises:
             KeyError: unknown backend name.
@@ -110,12 +129,16 @@ class Orchestrator:
             # Fast path: alive and healthy.
             if loader.is_alive:
                 if await loader.is_healthy():
+                    increase = extra_vram_gb - self._extra_vram.get(name, 0.0)
+                    if increase > 0:
+                        await self._make_room(increase, exclude=name)
                     return loader
                 logger.warning("[%s] Health check failed — killing and relaunching", name)
                 await loader.kill()
 
             # Make room if needed.
-            needed = loader.config.expected_vram_gb
+            self._extra_vram.pop(name, None)  # Dead process holds no model
+            needed = loader.config.expected_vram_gb + extra_vram_gb
             if needed > 0:
                 await self._make_room(needed, exclude=name)
 
@@ -157,6 +180,7 @@ class Orchestrator:
                 victim.config.name, freed, needed_gb, available,
             )
             await victim.stop()
+            self._extra_vram.pop(victim.config.name, None)
             await self._confirm_vram_freed(available + freed)
 
             available = await self.available_vram_gb()

@@ -1,0 +1,60 @@
+# config.example.yaml — Smart LLM Router configuration example.
+# Copy to config.yaml and adjust paths/ports/VRAM figures for your machine.
+# Run: python router.py config.yaml
+
+router:
+  host: "0.0.0.0"
+  port: 8000
+  total_vram: 48          # GB — total GPU VRAM
+  vram_reserve: 2         # GB — keep free for OS / compositor
+
+backends:
+  # ── llama.cpp — passthrough (OpenAI /v1/chat/completions + Anthropic /v1/messages)
+  # Request `model` field selects the backend by name; first entry is the default.
+  qwen3.6-27b:
+    type: llama
+    binary: llama-server
+    model: ~/models/llm/Huihui-Qwen3.6-27B-abliterated-mtp-Q8_0.gguf
+    port: 8080
+    context_size: 200000
+    gpu_layers: 99
+    vram_usage: 45        # GB estimated; measured on launch thereafter
+    retries: 1
+    extra_args:           # Passed through to llama-server verbatim
+      - "--mmproj"
+      - "~/models/llm/Qwen3.6-27B-mmproj-F16.gguf"
+      - "--temp" 
+      - "0.6"
+      - "--top-p"
+      - "0.95"
+      - "--min-p"
+      - "0.01"
+      - "--top-k"
+      - "20"
+
+  # ── CrispASR — passthrough (OpenAI /v1/audio/*)
+  asr:
+    type: crispasr
+    binary: crispasr
+    model: auto           # or /path/to/parakeet-0.6b.gguf
+    backend: parakeet
+    port: 8081
+    vram_usage: 0.5
+    retries: 1
+
+  # ── ComfyUI — translated (/v1/images/generations → workflow injection)
+  # `model` field selects a workflow; its VRAM is budgeted per request since
+  # ComfyUI loads models on demand.
+  image:
+    type: comfyui
+    venv: ~/ComfyUI/venv/bin/python
+    working_dir: ~/ComfyUI
+    main: main.py
+    port: 8188
+    vram_usage: 1         # The ComfyUI process itself
+    output_dir: ~/ComfyUI/output   # Where SaveImage writes; used to resolve filepaths
+    retries: 1
+    models:
+      krea2:
+        workflow: ~/projectnotes/untracked/Krea2 Basic.json
+        vram_usage: 14    # GB for the krea2 turbo checkpoint + VAE + CLIP
