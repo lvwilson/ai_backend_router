@@ -1,0 +1,59 @@
+# config.yaml — Live test configuration (Quadro RTX 8000, 48 GB).
+# llama backend mirrors ~/models/models.ini [Qwen3.6-27b]; ComfyUI is the
+# real install at ~/stable_diffusion/ComfyUI serving the Krea2 workflow.
+
+router:
+  host: "127.0.0.1"
+  port: 8000
+  total_vram: 48
+  vram_reserve: 2
+
+backends:
+  qwen3.6-27b:
+    type: llama
+    binary: llama-server
+    model: ~/models/llm/Huihui-Qwen3.6-27B-abliterated-mtp-Q8_0.gguf
+    port: 8080
+    context_size: 200000
+    gpu_layers: 99
+    vram_usage: 38        # Estimated; measured on launch thereafter
+    retries: 1
+    health_timeout: 300   # 28 GB of weights takes a while to load
+    extra_args:
+      - "--mmproj"
+      - "~/models/llm/Qwen3.6-27B-mmproj-F16.gguf"
+      - "--batch-size"
+      - "4096"
+      - "--ubatch-size"
+      - "1024"
+      - "--temp"
+      - "0.6"
+      - "--top-p"
+      - "0.95"
+      - "--min-p"
+      - "0.01"
+      - "--top-k"
+      - "20"
+      - "--spec-type"
+      - "draft-mtp"
+      - "--spec-draft-n-max"
+      - "2"
+      - "--cache-ram"
+      - "20000"
+      - "--image-min-tokens"
+      - "1024"
+
+  image:
+    type: comfyui
+    venv: ~/stable_diffusion/ComfyUI/venv/bin/python
+    working_dir: ~/stable_diffusion/ComfyUI
+    main: main.py
+    port: 8188
+    vram_usage: 3         # Torch CUDA context + ComfyUI overhead
+    output_dir: ~/stable_diffusion/ComfyUI/output
+    retries: 1
+    health_timeout: 180
+    models:
+      krea2:
+        workflow: ~/projectnotes/untracked/Krea2 Basic.json
+        vram_usage: 17    # unet 13G + vae 0.5G + clip (partially offloaded)
