@@ -5,11 +5,9 @@ Manages a single backend process (llama.cpp, CrispASR, ComfyUI) with:
   • Start / stop (graceful) / kill (force)
   • State machine (IDLE → STARTING → RUNNING → STOPPING → DEAD)
   • Process group signals (SIGTERM/SIGKILL via os.setsid)
+  • Health probing via HealthChecker (HTTP or socket)
   • Async context manager support
   • VRAM delta measurement and drift warnings
-
-Delegates to injected subsystems:
-  • HealthChecker  — health probing (HTTP or socket)
 
 Designed to be instantiated per-model by a larger orchestrator.
 
@@ -39,7 +37,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine
 
-from health_checker import HealthCheckConfig, HealthChecker
+from health_checker import HealthChecker
 
 EventCallback = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 
@@ -117,29 +115,7 @@ class ServiceConfig:
     # Graceful shutdown
     stop_timeout: float = 10.0                   # Seconds to wait after SIGTERM before SIGKILL
 
-    # ── Factory helpers ────────────────────────────────────────────────
 
-    def health_check_config(self) -> HealthCheckConfig:
-        """Build a HealthCheckConfig from this service config."""
-        return HealthCheckConfig(
-            port=self.port,
-            health_path=self.health_path,
-            health_timeout=self.health_timeout,
-            health_interval=self.health_interval,
-            health_host=self.health_host,
-            health_scheme=self.health_scheme,
-        )
-
-    def health_checker(self) -> HealthChecker:
-        """Build a HealthChecker from this service config."""
-        return HealthChecker(self.health_check_config())
-
-    @property
-    def health_url(self) -> str:
-        """Build the full health check URL from config."""
-        if self.port is None:
-            return ""
-        return f"{self.health_scheme}://{self.health_host}:{self.port}{self.health_path}"
 
 
 # ── ServiceLoader ──────────────────────────────────────────────────────────
@@ -150,16 +126,12 @@ class ServiceLoader:
 
     One instance per backend/model. The orchestrator creates several of these
     and coordinates VRAM-based eviction across them.
-
-    Subsystems are injected (or auto-created from config):
-      • health_checker  — probes the health endpoint
     """
 
     def __init__(
         self,
         config: ServiceConfig,
         event_callback: EventCallback | None = None,
-        health_checker: HealthChecker | None = None,
     ):
         self.config = config
         self._state = ServiceState.IDLE
@@ -167,8 +139,14 @@ class ServiceLoader:
         self._started_at: float | None = None
         self._event_callback = event_callback
 
-        # Injected subsystem (auto-created from config if not provided)
-        self.health_checker = health_checker or config.health_checker()
+        self.health_checker = HealthChecker(
+            port=config.port,
+            path=config.health_path,
+            host=config.health_host,
+            scheme=config.health_scheme,
+            timeout=config.health_timeout,
+            interval=config.health_interval,
+        )
 
         # VRAM tracking state
         self._vram_before_start: float | None = None
@@ -266,7 +244,7 @@ class ServiceLoader:
 
     @property
     def health_url(self) -> str:
-        return self.config.health_url
+        return self.health_checker.url
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 

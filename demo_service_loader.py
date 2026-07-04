@@ -45,7 +45,6 @@ async def demo_config():
     print(f"  args:           {config.args}")
     print(f"  expected_vram:  {config.expected_vram_gb} GB")
     print(f"  expected_ram:   {config.expected_ram_gb} GB")
-    print(f"  health_url:     '{config.health_url}'")
     return config
 
 
