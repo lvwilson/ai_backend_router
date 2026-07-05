@@ -261,6 +261,23 @@ class ServiceLoader:
             logger.info("[%s] Already %s, skipping start", self.config.name, self._state.value)
             return self._state == ServiceState.RUNNING
 
+        # Kill any stale OS process before launching a new one.
+        # This prevents VRAM leaks when a previous stop/kill didn't fully
+        # terminate the process (e.g. SIGKILL timeout).
+        if self._process is not None and self._process.returncode is None:
+            logger.warning(
+                "[%s] Stale process detected (PID %d, state=%s) — killing before restart",
+                self.config.name, self._process.pid, self._state.value,
+            )
+            try:
+                os.killpg(os.getpgid(self._process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                pass
+
         self._state = ServiceState.STARTING
         self._started_at = None
         self.reset_vram_tracking()
@@ -326,6 +343,8 @@ class ServiceLoader:
         """
         if self._state not in (ServiceState.RUNNING, ServiceState.STARTING):
             logger.info("[%s] Not running (state=%s), skipping stop", self.config.name, self._state.value)
+            # Still reset VRAM tracking so next start gets a fresh measurement.
+            self.reset_vram_tracking()
             return True
 
         self._state = ServiceState.STOPPING
@@ -334,6 +353,7 @@ class ServiceLoader:
         proc = self._process
         if proc is None or proc.returncode is not None:
             self._state = ServiceState.DEAD
+            self.reset_vram_tracking()
             await self._emit("stopped", {"clean": True})
             return True
 
@@ -344,6 +364,7 @@ class ServiceLoader:
         except ProcessLookupError:
             logger.info("[%s] Process %d already exited", self.config.name, proc.pid)
             self._state = ServiceState.DEAD
+            self.reset_vram_tracking()
             await self._emit("stopped", {"clean": True})
             return True
 
@@ -351,12 +372,14 @@ class ServiceLoader:
         try:
             await asyncio.wait_for(proc.wait(), timeout=self.config.stop_timeout)
             self._state = ServiceState.DEAD
+            self.reset_vram_tracking()
             await self._emit("stopped", {"clean": True})
             logger.info("[%s] Stopped gracefully (exit code %d)", self.config.name, proc.returncode)
             return True
         except asyncio.TimeoutError:
             logger.warning("[%s] Graceful stop timed out (%.1fs), sending SIGKILL", self.config.name, self.config.stop_timeout)
-            return await self._force_kill()
+            result = await self._force_kill()
+            return result
 
     async def kill(self) -> bool:
         """
@@ -410,6 +433,7 @@ class ServiceLoader:
         proc = self._process
         if proc is None or proc.returncode is not None:
             self._state = ServiceState.DEAD
+            self.reset_vram_tracking()
             return True
 
         try:
@@ -417,33 +441,51 @@ class ServiceLoader:
             logger.info("[%s] Sent SIGKILL to PID %d", self.config.name, proc.pid)
         except ProcessLookupError:
             self._state = ServiceState.DEAD
+            self.reset_vram_tracking()
             await self._emit("killed", {"clean": False})
             return True
 
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
             self._state = ServiceState.DEAD
+            self.reset_vram_tracking()
             await self._emit("killed", {"clean": False})
             logger.info("[%s] Killed (exit code %d)", self.config.name, proc.returncode)
             return True
         except asyncio.TimeoutError:
             self._state = ServiceState.DEAD
+            self.reset_vram_tracking()
             await self._emit("killed", {"clean": False, "force": True})
-            logger.error("[%s] Process %d did not exit after SIGKILL", self.config.name, proc.pid)
+            logger.error(
+                "[%s] Process %d did not exit after SIGKILL — VRAM tracking reset, "
+                "but process may still hold GPU memory",
+                self.config.name, proc.pid,
+            )
             return False
 
     async def _cleanup_process(self) -> None:
-        """Ensure the subprocess handle is cleaned up."""
+        """
+        Ensure the subprocess handle is cleaned up.
+
+        If the process is still running in the OS, force-kill it to prevent
+        silent VRAM leaks. This is critical: a process that fails its health
+        check may still be alive and holding GPU memory.
+        """
         if self._process is not None:
-            try:
-                # If still running, wait briefly for it to finish
-                if self._process.returncode is None:
-                    try:
-                        await asyncio.wait_for(self._process.wait(), timeout=2.0)
-                    except asyncio.TimeoutError:
-                        pass
-            except Exception:
-                pass
+            proc = self._process
+            if proc.returncode is None:
+                # Process still running — kill it to free VRAM
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    logger.info("[%s] Killed stale process PID %d during cleanup",
+                                self.config.name, proc.pid)
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    logger.warning("[%s] Process %d did not exit after cleanup SIGKILL",
+                                   self.config.name, proc.pid)
             self._process = None
 
     # ── Context manager ──────────────────────────────────────────────────
