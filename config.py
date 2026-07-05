@@ -61,9 +61,12 @@ class RouterConfig:
     backend_ports: dict[str, int] = field(default_factory=dict)
 
     def resolve_llama(self, model: str | None) -> str:
-        """Map a request's `model` field to a llama backend name."""
-        if model in self.llama_backends:
-            return model
+        """Map a request's `model` field to a llama backend name (case-insensitive)."""
+        if model is not None:
+            model_lower = model.lower()
+            for backend in self.llama_backends:
+                if backend.lower() == model_lower:
+                    return backend
         if not self.llama_backends:
             raise KeyError("No llama backends configured")
         if model is not None:
@@ -71,17 +74,23 @@ class RouterConfig:
         return self.llama_backends[0]  # Default when model field is omitted
 
     def resolve_audio(self, model: str | None) -> str:
-        """Map a request's `model` field to a crispasr backend name."""
-        if model in self.audio_backends:
-            return model
+        """Map a request's `model` field to a crispasr backend name (case-insensitive)."""
+        if model is not None:
+            model_lower = model.lower()
+            for backend in self.audio_backends:
+                if backend.lower() == model_lower:
+                    return backend
         if not self.audio_backends:
             raise KeyError("No audio backends configured")
         return self.audio_backends[0]  # Default: first configured
 
     def resolve_image_model(self, model: str | None) -> ImageModel:
-        """Map a request's `model` field to an image model (workflow + VRAM)."""
-        if model in self.image_models:
-            return self.image_models[model]
+        """Map a request's `model` field to an image model (case-insensitive)."""
+        if model is not None:
+            model_lower = model.lower()
+            for key, img_model in self.image_models.items():
+                if key.lower() == model_lower:
+                    return img_model
         if not self.image_models:
             raise KeyError("No image models configured")
         return next(iter(self.image_models.values()))  # Default: first configured
