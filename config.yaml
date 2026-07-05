@@ -46,7 +46,7 @@ backends:
     type: llama
     binary: llama-server
     model: ~/models/llm/Huihui-Qwen3.6-27B-abliterated-mtp-Q8_0.gguf
-    port: 8081
+    port: 8082
     context_size: 200000
     gpu_layers: 99
     vram_usage: 38
