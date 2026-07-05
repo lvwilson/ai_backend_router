@@ -47,6 +47,7 @@ class RouterConfig:
     total_vram_gb: float = 48.0
     vram_reserve_gb: float = 0.0
     sysram_reserve_gb: float = 16.0
+    cache_dir: str = "~/.cache/llama-router-cache"
 
     services: list[ServiceConfig] = field(default_factory=list)
 
@@ -82,13 +83,19 @@ class RouterConfig:
         return next(iter(self.image_models.values()))  # Default: first configured
 
 
-def _llama_service(name: str, spec: dict) -> ServiceConfig:
+def _llama_service(name: str, spec: dict, cache_dir: str | None = None) -> ServiceConfig:
     args = ["-m", _p(spec["model"]), "--port", str(spec["port"])]
     if "context_size" in spec:
         args += ["-c", str(spec["context_size"])]
     if "gpu_layers" in spec:
         args += ["-ngl", str(spec["gpu_layers"])]
     args += [_p(a) if str(a).startswith("~") else str(a) for a in spec.get("extra_args", [])]
+
+    # Slot persistence cache directory (llama.cpp prompt cache)
+    slot_save_path = _p(cache_dir) if cache_dir else None
+    if slot_save_path:
+        args += ["--slot-save-path", slot_save_path]
+
     return ServiceConfig(
         name=name,
         binary=spec.get("binary", "llama-server"),
@@ -98,6 +105,7 @@ def _llama_service(name: str, spec: dict) -> ServiceConfig:
         health_timeout=spec.get("health_timeout", 120.0),  # Large models load slowly
         expected_vram_gb=spec.get("vram_usage", 0.0),
         retries=spec.get("retries", 1),
+        slot_save_path=slot_save_path,
     )
 
 
@@ -163,6 +171,7 @@ def load_config(path: str | Path) -> RouterConfig:
         total_vram_gb=router.get("total_vram", 48.0),
         vram_reserve_gb=router.get("vram_reserve", 0.0),
         sysram_reserve_gb=router.get("sysram_reserve", 16.0),
+        cache_dir=router.get("cache_dir", "~/.cache/llama-router-cache"),
     )
 
     for name, spec in raw.get("backends", {}).items():
@@ -170,7 +179,10 @@ def load_config(path: str | Path) -> RouterConfig:
         if btype not in _BUILDERS:
             raise ValueError(f"Backend '{name}': unknown type '{btype}'")
 
-        cfg.services.append(_BUILDERS[btype](name, spec))
+        if btype == "llama":
+            cfg.services.append(_BUILDERS[btype](name, spec, cfg.cache_dir))
+        else:
+            cfg.services.append(_BUILDERS[btype](name, spec))
         cfg.backend_ports[name] = spec["port"]
 
         if btype == "llama":

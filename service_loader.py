@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import aiohttp
 import enum
 import logging
 import os
@@ -118,7 +119,8 @@ class ServiceConfig:
     # Launch retries (total attempts = 1 + retries)
     retries: int = 1                             # Extra launch attempts on failure
 
-
+    # Slot cache (llama.cpp prompt cache)
+    slot_save_path: str | None = None            # Directory for llama-server slot persistence cache
 
 
 # ── ServiceLoader ──────────────────────────────────────────────────────────
@@ -425,6 +427,67 @@ class ServiceLoader:
             "actual_vram_gb": self.actual_vram_gb,
             "started_at": self._started_at,
         }
+
+    # ── Slot cache (llama.cpp prompt cache) ──────────────────────────────
+
+    async def save_slot_cache(self) -> None:
+        """
+        Save the slot prompt cache via llama-server API.
+
+        Only meaningful for llama.cpp backends that have `slot_save_path`
+        configured. Uses the backend name as the cache filename so each
+        backend gets its own cache file.
+        """
+        if not self.config.slot_save_path:
+            return
+        if self._state != ServiceState.RUNNING:
+            return
+        filename = f"{self.config.name}.bin"
+        url = f"{self.health_scheme}://{self.config.health_host}:{self.config.port}/slots/0?action=save"
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.post(
+                    url,
+                    json={"filename": filename},
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    if resp.status == 200:
+                        logger.info("[%s] Slot cache saved as '%s'", self.config.name, filename)
+                    else:
+                        logger.warning(
+                            "[%s] Slot cache save returned %d", self.config.name, resp.status
+                        )
+        except Exception as exc:
+            logger.warning("[%s] Failed to save slot cache: %s", self.config.name, exc)
+
+    async def restore_slot_cache(self) -> None:
+        """
+        Restore the slot prompt cache via llama-server API.
+
+        Only meaningful for llama.cpp backends that have `slot_save_path`
+        configured. Uses the backend name as the cache filename.
+        """
+        if not self.config.slot_save_path:
+            return
+        if self._state != ServiceState.RUNNING:
+            return
+        filename = f"{self.config.name}.bin"
+        url = f"{self.health_scheme}://{self.config.health_host}:{self.config.port}/slots/0?action=restore"
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.post(
+                    url,
+                    json={"filename": filename},
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    if resp.status == 200:
+                        logger.info("[%s] Slot cache restored from '%s'", self.config.name, filename)
+                    else:
+                        logger.warning(
+                            "[%s] Slot cache restore returned %d", self.config.name, resp.status
+                        )
+        except Exception as exc:
+            logger.warning("[%s] Failed to restore slot cache: %s", self.config.name, exc)
 
     # ── Private helpers ──────────────────────────────────────────────────
 
