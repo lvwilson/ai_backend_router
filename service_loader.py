@@ -7,7 +7,7 @@ Manages a single backend process (llama.cpp, CrispASR, ComfyUI) with:
   • Process group signals (SIGTERM/SIGKILL via os.setsid)
   • Health probing via HealthChecker (HTTP or socket)
   • Async context manager support
-  • VRAM delta measurement and drift warnings
+  • Per-process VRAM accounting via nvidia-smi --query-compute-apps
 
 Designed to be instantiated per-model by a larger orchestrator.
 
@@ -55,8 +55,7 @@ async def query_vram_used_gb(retries: int = 2) -> float | None:
     """
     Query total VRAM used (across all GPUs) via nvidia-smi.
 
-    Retries transient failures (nvidia-smi can fail sporadically under
-    load or when subprocess spawning hiccups). Returns VRAM in GB, or
+    Retries transient failures. Returns VRAM in GB, or
     None if nvidia-smi is unavailable after all attempts.
     """
     for attempt in range(retries + 1):
@@ -93,6 +92,84 @@ async def query_vram_used_gb(retries: int = 2) -> float | None:
                 continue
             return None
     return None
+
+
+async def query_vram_total_gb() -> float | None:
+    """Query total VRAM capacity across all GPUs."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi",
+            "--query-gpu=memory.total",
+            "--format=csv,noheader,nounits",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return None
+        total_mi = 0.0
+        for line in stdout.decode().strip().splitlines():
+            line = line.strip()
+            if line:
+                total_mi += float(line)
+        return total_mi / 1024.0
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+async def query_per_process_vram() -> dict[int, float]:
+    """
+    Query VRAM usage per GPU process via nvidia-smi --query-compute-apps.
+
+    Returns a dict mapping PID (int) → VRAM usage in GB.
+    Returns empty dict if nvidia-smi is unavailable.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi",
+            "--query-compute-apps=pid,used_memory",
+            "--format=csv,noheader",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            return {}
+
+        result: dict[int, float] = {}
+        for line in stdout.decode().strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            pid_str = parts[0].strip()
+            mem_str = parts[1].strip()
+            try:
+                pid = int(pid_str)
+                # Memory is in "NNN MiB" format
+                mem_mi = float(mem_str.split()[0])
+                result[pid] = mem_mi / 1024.0
+            except (ValueError, IndexError):
+                continue
+        return result
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+async def query_process_vram(pid: int) -> float | None:
+    """
+    Query VRAM used by a specific PID.
+
+    Returns VRAM in GB, or None if the PID is not found on any GPU.
+    """
+    per_pid = await query_per_process_vram()
+    return per_pid.get(pid)
 
 
 # ── State machine ──────────────────────────────────────────────────────────
@@ -170,8 +247,8 @@ class ServiceLoader:
             interval=config.health_interval,
         )
 
-        # VRAM tracking state
-        self._vram_before_start: float | None = None
+        # VRAM tracking — authoritative per-process measurement.
+        # Set after successful start via measure_vram_from_pid().
         self._actual_vram_gb: float | None = None
         self._vram_drift_warned_at: float | None = None
 
@@ -187,20 +264,18 @@ class ServiceLoader:
 
     # ── VRAM tracking ────────────────────────────────────────────────────
 
-    async def record_pre_start_vram(self) -> None:
-        """Capture VRAM usage before the service process is launched."""
-        self._vram_before_start = await query_vram_used_gb()
-        self._actual_vram_gb = None
+    async def measure_vram_from_pid(self) -> float | None:
+        """
+        Measure this service's VRAM by querying its PID directly via nvidia-smi.
 
-    async def measure_vram_delta(self) -> float | None:
-        """Measure VRAM delta since pre-start snapshot."""
-        if self._vram_before_start is None:
+        This is authoritative: it reads exactly what the GPU driver reports
+        for our process, regardless of what else is on the GPU.
+        """
+        if self.pid is None:
             return None
-        current = await query_vram_used_gb()
-        if current is None:
-            return None
-        delta = current - self._vram_before_start
-        self._actual_vram_gb = round(delta, 2)
+        vram = await query_process_vram(self.pid)
+        if vram is not None:
+            self._actual_vram_gb = round(vram, 2)
         return self._actual_vram_gb
 
     async def check_vram_drift(self) -> None:
@@ -236,7 +311,6 @@ class ServiceLoader:
 
     def reset_vram_tracking(self) -> None:
         """Reset VRAM tracking state for a restart."""
-        self._vram_before_start = None
         self._actual_vram_gb = None
         self._vram_drift_warned_at = None
 
@@ -301,9 +375,6 @@ class ServiceLoader:
         self._started_at = None
         self.reset_vram_tracking()
 
-        # Measure VRAM before launch
-        await self.record_pre_start_vram()
-
         # Build environment
         env = os.environ.copy()
         if self.config.env:
@@ -335,7 +406,8 @@ class ServiceLoader:
 
             if healthy:
                 self._state = ServiceState.RUNNING
-                await self.measure_vram_delta()
+                # Measure VRAM from the live PID — authoritative per-process reading.
+                await self.measure_vram_from_pid()
                 await self.check_vram_drift()
                 await self._emit("started", {"pid": self._process.pid})
                 logger.info("[%s] Service is healthy and running", self.config.name)

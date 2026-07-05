@@ -45,6 +45,9 @@ from router import create_app
 async def _no_gpu(*args, **kwargs):
     return None
 
+async def _no_per_process_vram(*args, **kwargs):
+    return {}
+
 MOCK = HERE / "mock_backend.py"
 WORKFLOW = HERE / "krea2_basic.json"
 
@@ -100,15 +103,23 @@ def running(orch) -> set[str]:
 
 async def main() -> int:
     # Stub GPU telemetry for the duration of this test only.
+    # Both total VRAM and per-process queries must be stubbed so the test
+    # uses deterministic tracked bookkeeping (not live nvidia-smi readings).
     orig_orch_query = orch_mod.query_vram_used_gb
     orig_sl_query = sl_mod.query_vram_used_gb
+    orig_orch_per_pid = orch_mod.query_per_process_vram
+    orig_sl_per_pid = sl_mod.query_per_process_vram
     orch_mod.query_vram_used_gb = _no_gpu
     sl_mod.query_vram_used_gb = _no_gpu
+    orch_mod.query_per_process_vram = _no_per_process_vram
+    sl_mod.query_per_process_vram = _no_per_process_vram
     try:
         return await _run()
     finally:
         orch_mod.query_vram_used_gb = orig_orch_query
         sl_mod.query_vram_used_gb = orig_sl_query
+        orch_mod.query_per_process_vram = orig_orch_per_pid
+        sl_mod.query_per_process_vram = orig_sl_per_pid
 
 
 async def _run() -> int:
