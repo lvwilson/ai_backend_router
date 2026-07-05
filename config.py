@@ -17,6 +17,8 @@ Backend types:
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -91,10 +93,21 @@ def _llama_service(name: str, spec: dict, cache_dir: str | None = None) -> Servi
         args += ["-ngl", str(spec["gpu_layers"])]
     args += [_p(a) if str(a).startswith("~") else str(a) for a in spec.get("extra_args", [])]
 
-    # Slot persistence cache directory (llama.cpp prompt cache)
+    # Slot persistence cache directory (llama.cpp prompt cache).
+    # llama-server exits immediately if the directory does not exist, so
+    # create it up front. If creation fails for any reason, degrade
+    # gracefully: run without the prompt cache rather than blocking startup.
     slot_save_path = _p(cache_dir) if cache_dir else None
     if slot_save_path:
-        args += ["--slot-save-path", slot_save_path]
+        try:
+            os.makedirs(slot_save_path, exist_ok=True)
+            args += ["--slot-save-path", slot_save_path]
+        except OSError as exc:
+            logging.getLogger(__name__).warning(
+                "[%s] Cannot create slot cache dir '%s' (%s) — running without prompt cache",
+                name, slot_save_path, exc,
+            )
+            slot_save_path = None
 
     return ServiceConfig(
         name=name,
