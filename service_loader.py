@@ -51,31 +51,48 @@ VRAM_DRIFT_THRESHOLD_GB = 2.0       # Warn if actual differs from expected by >2
 VRAM_DRIFT_WARN_INTERVAL = 300.0    # Seconds between drift warnings (5 min)
 
 
-async def query_vram_used_gb() -> float | None:
+async def query_vram_used_gb(retries: int = 2) -> float | None:
     """
     Query total VRAM used (across all GPUs) via nvidia-smi.
 
-    Returns VRAM in GB, or None if nvidia-smi is unavailable.
+    Retries transient failures (nvidia-smi can fail sporadically under
+    load or when subprocess spawning hiccups). Returns VRAM in GB, or
+    None if nvidia-smi is unavailable after all attempts.
     """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "nvidia-smi",
-            "--query-gpu=memory.used",
-            "--format=csv,noheader,nounits",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await proc.communicate()
-        if proc.returncode != 0:
+    for attempt in range(retries + 1):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "nvidia-smi",
+                "--query-gpu=memory.used",
+                "--format=csv,noheader,nounits",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.debug(
+                    "nvidia-smi failed (attempt %d, rc=%s): %s",
+                    attempt, proc.returncode, stderr.decode(errors="replace").strip(),
+                )
+                if attempt < retries:
+                    await asyncio.sleep(0.5)
+                    continue
+                return None
+            total_mi = 0.0
+            for line in stdout.decode().strip().splitlines():
+                line = line.strip()
+                if line:
+                    total_mi += float(line)
+            return total_mi / 1024.0
+        except FileNotFoundError:
             return None
-        total_mi = 0.0
-        for line in stdout.decode().strip().splitlines():
-            line = line.strip()
-            if line:
-                total_mi += float(line)
-        return total_mi / 1024.0
-    except FileNotFoundError:
-        return None
+        except Exception as exc:
+            logger.debug("nvidia-smi query error (attempt %d): %s", attempt, exc)
+            if attempt < retries:
+                await asyncio.sleep(0.5)
+                continue
+            return None
+    return None
 
 
 # ── State machine ──────────────────────────────────────────────────────────
@@ -443,7 +460,7 @@ class ServiceLoader:
         if self._state != ServiceState.RUNNING:
             return
         filename = f"{self.config.name}.bin"
-        url = f"{self.health_scheme}://{self.config.health_host}:{self.config.port}/slots/0?action=save"
+        url = f"{self.config.health_scheme}://{self.config.health_host}:{self.config.port}/slots/0?action=save"
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 async with session.post(
@@ -472,7 +489,7 @@ class ServiceLoader:
         if self._state != ServiceState.RUNNING:
             return
         filename = f"{self.config.name}.bin"
-        url = f"{self.health_scheme}://{self.config.health_host}:{self.config.port}/slots/0?action=restore"
+        url = f"{self.config.health_scheme}://{self.config.health_host}:{self.config.port}/slots/0?action=restore"
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 async with session.post(
