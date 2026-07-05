@@ -467,6 +467,24 @@ class ServiceLoader:
                 return True
             else:
                 self._state = ServiceState.DEAD
+                # Capture stderr before cleanup kills the process
+                stderr_tail = ""
+                if self._process is not None:
+                    try:
+                        stderr_data = self._process.stderr.readline()
+                        # Read remaining stderr
+                        remaining = await asyncio.wait_for(
+                            self._process.stderr.read(), timeout=2.0
+                        )
+                        stderr_tail = remaining.decode(errors="replace").strip()
+                    except Exception:
+                        pass
+                if stderr_tail:
+                    # Log last ~20 lines of stderr for debugging
+                    lines = stderr_tail.split("\n")[-20:]
+                    for line in lines:
+                        if line.strip():
+                            logger.warning("[%s] startup stderr: %s", self.config.name, line.strip())
                 await self._cleanup_process()
                 await self._emit("unhealthy", {"reason": "health_check_failed_on_start"})
                 logger.warning("[%s] Service failed health check on start", self.config.name)
