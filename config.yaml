@@ -42,6 +42,40 @@ backends:
       - "--image-min-tokens"
       - "1024"
 
+  qwen3.6-27b-cached:
+    type: llama
+    binary: llama-server
+    model: ~/models/llm/Huihui-Qwen3.6-27B-abliterated-mtp-Q8_0.gguf
+    port: 8083
+    context_size: 200000
+    gpu_layers: 99
+    vram_usage: 43
+    retries: 1
+    health_timeout: 60
+    extra_args:
+      - "--batch-size"
+      - "4096"
+      - "--ubatch-size"
+      - "1024"
+      - "--temp"
+      - "0.6"
+      - "--top-p"
+      - "0.95"
+      - "--min-p"
+      - "0.01"
+      - "--top-k"
+      - "20"
+      - "--reasoning-budget"
+      - "0"
+      - "--reasoning"
+      - "off"
+      - "--spec-type"
+      - "draft-mtp"
+      - "--spec-draft-n-max"
+      - "2"
+      - "--cache-ram"
+      - "20000"
+
   qwen3.6-27b-instruct:
     type: llama
     binary: llama-server
