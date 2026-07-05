@@ -40,11 +40,10 @@ from config import load_config
 from router import create_app
 
 # Stub GPU telemetry → deterministic tracked bookkeeping.
-async def _no_gpu():
+# NOTE: applied/restored inside main() so that merely importing this module
+# (e.g. during pytest collection) does not pollute global state for other tests.
+async def _no_gpu(*args, **kwargs):
     return None
-
-orch_mod.query_vram_used_gb = _no_gpu
-sl_mod.query_vram_used_gb = _no_gpu
 
 MOCK = HERE / "mock_backend.py"
 WORKFLOW = HERE / "krea2_basic.json"
@@ -100,6 +99,19 @@ def running(orch) -> set[str]:
 
 
 async def main() -> int:
+    # Stub GPU telemetry for the duration of this test only.
+    orig_orch_query = orch_mod.query_vram_used_gb
+    orig_sl_query = sl_mod.query_vram_used_gb
+    orch_mod.query_vram_used_gb = _no_gpu
+    sl_mod.query_vram_used_gb = _no_gpu
+    try:
+        return await _run()
+    finally:
+        orch_mod.query_vram_used_gb = orig_orch_query
+        sl_mod.query_vram_used_gb = orig_sl_query
+
+
+async def _run() -> int:
     outdir = tempfile.mkdtemp(prefix="router_e2e_")
     cfg_file = Path(outdir) / "config.yaml"
     cfg_file.write_text(CONFIG_TEMPLATE.format(mock=MOCK, outdir=outdir, workflow=WORKFLOW))
