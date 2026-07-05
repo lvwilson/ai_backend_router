@@ -56,6 +56,7 @@ def create_app(config: RouterConfig) -> FastAPI:
         config.services,
         total_vram_gb=config.total_vram_gb,
         vram_reserve_gb=config.vram_reserve_gb,
+        sysram_reserve_gb=config.sysram_reserve_gb,
     )
 
     @asynccontextmanager
@@ -71,6 +72,14 @@ def create_app(config: RouterConfig) -> FastAPI:
     app.state.orch = orch
     app.state.config = config
 
+    # ── Exception handler (catches unhandled route errors) ───────────────
+
+    @app.exception_handler(Exception)
+    async def catch_all(request: Request, exc: Exception):
+        import traceback
+        logger.error("Unhandled exception on %s %s:\n%s", request.method, request.url.path, traceback.format_exc())
+        return error(500, f"Internal server error: {exc}")
+
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def error(status: int, message: str) -> JSONResponse:
@@ -78,11 +87,14 @@ def create_app(config: RouterConfig) -> FastAPI:
 
     async def proxy(request: Request, backend_name: str, body: bytes | None = None) -> StreamingResponse:
         """Ensure the backend is up, then stream the request through to it."""
+        logger.debug("[%s] Proxying %s %s (body=%s bytes)", backend_name, request.method, request.url.path, len(body) if body else 0)
         try:
             loader = await orch.ensure_running(backend_name)
         except InsufficientVRAMError as exc:
+            logger.error("[%s] Insufficient VRAM: %s", backend_name, exc)
             return error(507, str(exc))
         except (KeyError, RuntimeError) as exc:
+            logger.error("[%s] Backend error: %s", backend_name, exc)
             return error(503, str(exc))
 
         port = loader.config.port
@@ -99,6 +111,8 @@ def create_app(config: RouterConfig) -> FastAPI:
         except aiohttp.ClientError as exc:
             logger.error("[%s] Backend request failed: %s", backend_name, exc)
             return error(503, f"Backend '{backend_name}' unreachable: {exc}")
+
+        logger.debug("[%s] Backend responded: %d", backend_name, resp.status)
 
         async def stream():
             try:
@@ -130,17 +144,45 @@ def create_app(config: RouterConfig) -> FastAPI:
             return error(400, str(exc))
         return await proxy(request, backend, body)
 
-    # ── Audio routes (passthrough) ───────────────────────────────────────
+    # ── Audio routes (passthrough, routed by model) ──────────────────────
+
+    async def audio_model(request: Request) -> tuple[bytes, str | None]:
+        """Read body and extract the `model` field (JSON or multipart)."""
+        body = await request.body()
+        # Try JSON first
+        try:
+            model = json.loads(body).get("model")
+            if model:
+                return body, model
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        # Try multipart form-data: name="model" followed by value on next line
+        try:
+            import re
+            m = re.search(rb'name="model"\r?\n\r?\n([^\r\n]+)', body)
+            if m:
+                return body, m.group(1).decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        return body, None  # Let resolve_audio pick the default
 
     @app.post("/v1/audio/transcriptions")
     @app.post("/v1/audio/speech")
     @app.post("/v1/audio/speech-to-speech")
     @app.post("/v1/translate")
-    @app.get("/v1/voices")
     async def audio(request: Request):
-        if config.audio_backend is None:
-            return error(400, "No audio backend configured")
-        return await proxy(request, config.audio_backend)
+        if not config.audio_backends:
+            return error(400, "No audio backends configured")
+        body, model = await audio_model(request)
+        backend = config.resolve_audio(model)
+        logger.info("Audio route: model=%r → backend=%s", model, backend)
+        return await proxy(request, backend, body)
+
+    @app.get("/v1/voices")
+    async def voices(request: Request):
+        if not config.audio_backends:
+            return error(400, "No audio backends configured")
+        return await proxy(request, config.audio_backends[0])
 
     # ── Image route (translated) ─────────────────────────────────────────
 
@@ -212,8 +254,7 @@ def create_app(config: RouterConfig) -> FastAPI:
     @app.get("/v1/models")
     async def models():
         data = [{"id": n, "object": "model", "owned_by": "llama"} for n in config.llama_backends]
-        if config.audio_backend:
-            data.append({"id": config.audio_backend, "object": "model", "owned_by": "crispasr"})
+        data += [{"id": n, "object": "model", "owned_by": "crispasr"} for n in config.audio_backends]
         data += [{"id": n, "object": "model", "owned_by": "comfyui"} for n in config.image_models]
         return {"object": "list", "data": data}
 
@@ -227,11 +268,25 @@ def create_app(config: RouterConfig) -> FastAPI:
 def main() -> None:
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    log_file = Path("router.log")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stderr),
+            logging.FileHandler(log_file, mode="a"),
+        ],
+    )
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     config = load_config(config_path)
     app = create_app(config)
-    uvicorn.run(app, host=config.host, port=config.port)
+    uvicorn.run(app, host=config.host, port=config.port, log_level="info")
+
+
+def get_app() -> FastAPI:
+    """Zero-arg factory for uvicorn --factory mode."""
+    config = load_config("config.yaml")
+    return create_app(config)
 
 
 if __name__ == "__main__":

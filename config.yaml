@@ -6,7 +6,6 @@ router:
   host: "127.0.0.1"
   port: 8000
   total_vram: 48
-  vram_reserve: 2
 
 backends:
   qwen3.6-27b:
@@ -42,6 +41,67 @@ backends:
       - "20000"
       - "--image-min-tokens"
       - "1024"
+
+  qwen3-asr-1.7b:
+    type: crispasr
+    binary: ~/CrispASR/build/bin/crispasr
+    backend: qwen3-1.7b
+    model: ~/models/stt/Qwen3-ASR-1.7B-Q8_0.gguf
+    port: 9000
+    vram_usage: 2.5
+    health_timeout: 30
+
+  qwen3-asr-1.7b-cpu:
+    type: crispasr
+    binary: ~/CrispASR/build/bin/crispasr
+    backend: qwen3-1.7b
+    model: ~/models/stt/Qwen3-ASR-1.7B-Q8_0.gguf
+    port: 9001
+    cpu: true
+    ram_usage: 3.0
+    health_timeout: 30
+
+  qwen-talker-1.7b-customvoice:
+    type: crispasr
+    binary: ~/CrispASR/build/bin/crispasr
+    backend: qwen3-tts-1.7b-customvoice
+    model: ~/models/tts/qwen-talker-1.7b-customvoice-Q8_0.gguf
+    codec_model: ~/models/tts/qwen3-tts-tokenizer-12hz-q8_0.gguf
+    port: 9002
+    vram_usage: 2.5
+    health_timeout: 30
+
+  qwen-talker-1.7b-customvoice-cpu:
+    type: crispasr
+    binary: ~/CrispASR/build/bin/crispasr
+    backend: qwen3-tts-1.7b-customvoice
+    model: ~/models/tts/qwen-talker-1.7b-customvoice-Q8_0.gguf
+    codec_model: ~/models/tts/qwen3-tts-tokenizer-12hz-q8_0.gguf
+    port: 9003
+    cpu: true
+    ram_usage: 3.0
+    health_timeout: 30
+
+  qwen-talker-1.7b-voicedesign:
+    type: crispasr
+    binary: ~/CrispASR/build/bin/crispasr
+    backend: qwen3-tts-1.7b-voicedesign
+    model: ~/models/tts/qwen-talker-1.7b-voicedesign-Q8_0.gguf
+    codec_model: ~/models/tts/qwen3-tts-tokenizer-12hz-q8_0.gguf
+    port: 9004
+    vram_usage: 2.5
+    health_timeout: 30
+
+  qwen-talker-1.7b-voicedesign-cpu:
+    type: crispasr
+    binary: ~/CrispASR/build/bin/crispasr
+    backend: qwen3-tts-1.7b-voicedesign
+    model: ~/models/tts/qwen-talker-1.7b-voicedesign-Q8_0.gguf
+    codec_model: ~/models/tts/qwen3-tts-tokenizer-12hz-q8_0.gguf
+    port: 9005
+    cpu: true
+    ram_usage: 3.0
+    health_timeout: 30
 
   image:
     type: comfyui

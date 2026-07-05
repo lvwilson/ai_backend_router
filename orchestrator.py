@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from service_loader import (
@@ -33,6 +34,26 @@ from service_loader import (
     ServiceState,
     query_vram_used_gb,
 )
+
+
+async def query_sysram_used_gb() -> float | None:
+    """
+    Query total system RAM used via /proc/meminfo.
+
+    Returns RAM used in GB, or None if unavailable.
+    """
+    try:
+        text = await asyncio.to_thread(lambda: Path("/proc/meminfo").read_text())
+        lines = {k: v for k, v in (
+            (line.split(":")[0].strip(), int(line.split(":")[1].strip().split()[0]))
+            for line in text.splitlines() if ":" in line
+        )}
+        total_kb = lines.get("MemTotal", 0)
+        available_kb = lines.get("MemAvailable", lines.get("MemFree", 0))
+        used_kb = total_kb - available_kb
+        return used_kb / (1024.0 * 1024.0)
+    except Exception:
+        return None
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +67,10 @@ class InsufficientVRAMError(Exception):
 
 class Orchestrator:
     """
-    Coordinates multiple ServiceLoaders under a shared VRAM budget.
+    Coordinates multiple ServiceLoaders under shared VRAM and sysram budgets.
+
+    GPU backends are budgeted against VRAM (nvidia-smi); CPU backends are
+    budgeted against system RAM (/proc/meminfo).  Each is tracked independently.
 
     Usage:
         orch = Orchestrator(configs, total_vram_gb=48, vram_reserve_gb=2)
@@ -60,10 +84,12 @@ class Orchestrator:
         configs: list[ServiceConfig],
         total_vram_gb: float,
         vram_reserve_gb: float = 2.0,
+        sysram_reserve_gb: float = 2.0,
         event_callback: EventCallback | None = None,
     ):
         self.total_vram_gb = total_vram_gb
         self.vram_reserve_gb = vram_reserve_gb
+        self.sysram_reserve_gb = sysram_reserve_gb
         self.services: dict[str, ServiceLoader] = {
             c.name: ServiceLoader(c, event_callback=event_callback) for c in configs
         }
@@ -92,6 +118,35 @@ class Orchestrator:
 
     def _running(self) -> list[ServiceLoader]:
         return [s for s in self.services.values() if s.is_alive]
+
+    # ── Sysram accounting (CPU backends) ─────────────────────────────────
+
+    def _tracked_ram(self, loader: ServiceLoader) -> float:
+        """RAM attributed to a CPU service."""
+        return loader.config.expected_ram_gb
+
+    async def available_sysram_gb(self) -> float:
+        """System RAM available for CPU backends."""
+        used = await query_sysram_used_gb()
+        if used is None:
+            used = sum(self._tracked_ram(s) for s in self._running())
+        # Total RAM is inferred from /proc/meminfo; reserve is subtracted.
+        total = await query_sysram_used_gb()
+        if total is not None:
+            try:
+                text = await asyncio.to_thread(lambda: Path("/proc/meminfo").read_text())
+                for line in text.splitlines():
+                    if line.startswith("MemTotal"):
+                        total_gb = int(line.split(":")[1].strip().split()[0]) / (1024.0 * 1024.0)
+                        break
+                else:
+                    total_gb = None
+            except Exception:
+                total_gb = None
+            if total_gb is not None:
+                return total_gb - self.sysram_reserve_gb - used
+        # Fallback: tracked bookkeeping with a reasonable total estimate
+        return 64.0 - self.sysram_reserve_gb - used
 
     async def available_vram_gb(self) -> float:
         """
@@ -124,6 +179,7 @@ class Orchestrator:
             RuntimeError: launch failed after retries.
         """
         loader = self.services[name]
+        is_cpu = loader.config.expected_ram_gb > 0 and loader.config.expected_vram_gb == 0
 
         async with self._lock:
             # Fast path: alive and healthy.
@@ -131,16 +187,19 @@ class Orchestrator:
                 if await loader.is_healthy():
                     increase = extra_vram_gb - self._extra_vram.get(name, 0.0)
                     if increase > 0:
-                        await self._make_room(increase, exclude=name)
+                        await self._make_room(increase, exclude=name, cpu=is_cpu)
                     return loader
                 logger.warning("[%s] Health check failed — killing and relaunching", name)
                 await loader.kill()
 
             # Make room if needed.
             self._extra_vram.pop(name, None)  # Dead process holds no model
-            needed = loader.config.expected_vram_gb + extra_vram_gb
+            if is_cpu:
+                needed = loader.config.expected_ram_gb
+            else:
+                needed = loader.config.expected_vram_gb + extra_vram_gb
             if needed > 0:
-                await self._make_room(needed, exclude=name)
+                await self._make_room(needed, exclude=name, cpu=is_cpu)
 
             # Launch with retries.
             attempts = 1 + max(0, loader.config.retries)
@@ -151,18 +210,46 @@ class Orchestrator:
 
             raise RuntimeError(f"Backend '{name}' failed to start after {attempts} attempt(s)")
 
-    async def _make_room(self, needed_gb: float, exclude: str) -> None:
+    async def _make_room(self, needed_gb: float, exclude: str, cpu: bool = False) -> None:
         """
         Evict running backends smallest-first until needed_gb fits the budget.
 
+        Args:
+            needed_gb: GB needed (VRAM for GPU backends, RAM for CPU backends).
+            exclude: Backend name to skip (the one about to be launched).
+            cpu: If True, use sysram budget; otherwise VRAM budget.
+
         Raises InsufficientVRAMError if it cannot fit even with all evicted.
         """
-        available = await self.available_vram_gb()
+        if cpu:
+            available = await self.available_sysram_gb()
+            tracker = self._tracked_ram
+            label = "sysram"
+        else:
+            available = await self.available_vram_gb()
+            tracker = self._tracked_vram
+            label = "VRAM"
+
         if available >= needed_gb:
             return
 
         # Sanity: can it ever fit?
-        if needed_gb > self.total_vram_gb - self.vram_reserve_gb:
+        if cpu:
+            try:
+                text = await asyncio.to_thread(lambda: Path("/proc/meminfo").read_text())
+                for line in text.splitlines():
+                    if line.startswith("MemTotal"):
+                        budget = int(line.split(":")[1].strip().split()[0]) / (1024.0 * 1024.0) - self.sysram_reserve_gb
+                        break
+                else:
+                    budget = None
+            except Exception:
+                budget = None
+            if budget is not None and needed_gb > budget:
+                raise InsufficientVRAMError(
+                    f"Backend needs {needed_gb:.1f} GB sysram but budget is only {budget:.1f} GB"
+                )
+        elif needed_gb > self.total_vram_gb - self.vram_reserve_gb:
             raise InsufficientVRAMError(
                 f"Backend needs {needed_gb:.1f} GB but budget is only "
                 f"{self.total_vram_gb - self.vram_reserve_gb:.1f} GB"
@@ -170,26 +257,30 @@ class Orchestrator:
 
         victims = sorted(
             (s for s in self._running() if s.config.name != exclude),
-            key=self._tracked_vram,
+            key=tracker,
         )
 
         for victim in victims:
-            freed = self._tracked_vram(victim)
+            freed = tracker(victim)
             logger.info(
-                "VRAM pressure: evicting '%s' (~%.1f GB) — need %.1f GB, have %.1f GB",
-                victim.config.name, freed, needed_gb, available,
+                "%s pressure: evicting '%s' (~%.1f GB) — need %.1f GB, have %.1f GB",
+                label, victim.config.name, freed, needed_gb, available,
             )
             await victim.stop()
             self._extra_vram.pop(victim.config.name, None)
-            await self._confirm_vram_freed(available + freed)
 
-            available = await self.available_vram_gb()
+            if not cpu:
+                await self._confirm_vram_freed(available + freed)
+                available = await self.available_vram_gb()
+            else:
+                available = await self.available_sysram_gb()
+
             if available >= needed_gb:
                 return
 
         if available < needed_gb:
             raise InsufficientVRAMError(
-                f"Only {available:.1f} GB available after evicting all backends; "
+                f"Only {available:.1f} GB {label} available after evicting all backends; "
                 f"need {needed_gb:.1f} GB"
             )
 

@@ -45,13 +45,14 @@ class RouterConfig:
     host: str = "0.0.0.0"
     port: int = 8000
     total_vram_gb: float = 48.0
-    vram_reserve_gb: float = 2.0
+    vram_reserve_gb: float = 0.0
+    sysram_reserve_gb: float = 16.0
 
     services: list[ServiceConfig] = field(default_factory=list)
 
     # Routing maps
     llama_backends: list[str] = field(default_factory=list)     # In config order
-    audio_backend: str | None = None                            # First crispasr
+    audio_backends: list[str] = field(default_factory=list)     # crispasr backend names (in config order)
     image_models: dict[str, ImageModel] = field(default_factory=dict)
     comfyui_output_dirs: dict[str, str] = field(default_factory=dict)  # backend → output dir
     backend_ports: dict[str, int] = field(default_factory=dict)
@@ -63,6 +64,14 @@ class RouterConfig:
         if not self.llama_backends:
             raise KeyError("No llama backends configured")
         return self.llama_backends[0]  # Default: first configured
+
+    def resolve_audio(self, model: str | None) -> str:
+        """Map a request's `model` field to a crispasr backend name."""
+        if model in self.audio_backends:
+            return model
+        if not self.audio_backends:
+            raise KeyError("No audio backends configured")
+        return self.audio_backends[0]  # Default: first configured
 
     def resolve_image_model(self, model: str | None) -> ImageModel:
         """Map a request's `model` field to an image model (workflow + VRAM)."""
@@ -93,18 +102,28 @@ def _llama_service(name: str, spec: dict) -> ServiceConfig:
 
 
 def _crispasr_service(name: str, spec: dict) -> ServiceConfig:
+    binary = spec.get("binary", "~/CrispASR/build/bin/crispasr")
+    if str(binary).startswith("~"):
+        binary = _p(binary)
     args = ["--server", "-m", _p(spec["model"]), "--port", str(spec["port"])]
     if "backend" in spec:
         args += ["--backend", str(spec["backend"])]
+    if spec.get("cpu"):
+        args += ["--no-gpu"]
+    if "codec_model" in spec:
+        args += ["--codec-model", _p(spec["codec_model"])]
+    if "voice_dir" in spec:
+        args += ["--voice-dir", _p(spec["voice_dir"])]
     args += [str(a) for a in spec.get("extra_args", [])]
     return ServiceConfig(
         name=name,
-        binary=spec.get("binary", "crispasr"),
+        binary=binary,
         args=args,
         port=spec["port"],
         health_path=spec.get("health_path", "/v1/models"),
         health_timeout=spec.get("health_timeout", 60.0),
         expected_vram_gb=spec.get("vram_usage", 0.0),
+        expected_ram_gb=spec.get("ram_usage", 0.0),
         retries=spec.get("retries", 1),
     )
 
@@ -142,7 +161,8 @@ def load_config(path: str | Path) -> RouterConfig:
         host=router.get("host", "0.0.0.0"),
         port=router.get("port", 8000),
         total_vram_gb=router.get("total_vram", 48.0),
-        vram_reserve_gb=router.get("vram_reserve", 2.0),
+        vram_reserve_gb=router.get("vram_reserve", 0.0),
+        sysram_reserve_gb=router.get("sysram_reserve", 16.0),
     )
 
     for name, spec in raw.get("backends", {}).items():
@@ -156,8 +176,7 @@ def load_config(path: str | Path) -> RouterConfig:
         if btype == "llama":
             cfg.llama_backends.append(name)
         elif btype == "crispasr":
-            if cfg.audio_backend is None:
-                cfg.audio_backend = name
+            cfg.audio_backends.append(name)
         elif btype == "comfyui":
             if "output_dir" in spec:
                 cfg.comfyui_output_dirs[name] = _p(spec["output_dir"])
