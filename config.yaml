@@ -15,9 +15,9 @@ backends:
     port: 8080
     context_size: 200000
     gpu_layers: 99
-    vram_usage: 38        # Estimated; measured on launch thereafter
+    vram_usage: 43        
     retries: 1
-    health_timeout: 300   # 28 GB of weights takes a while to load
+    health_timeout: 60
     extra_args:
       - "--mmproj"
       - "~/models/llm/Qwen3.6-27B-mmproj-F16.gguf"
@@ -49,9 +49,9 @@ backends:
     port: 8082
     context_size: 200000
     gpu_layers: 99
-    vram_usage: 38
+    vram_usage: 43
     retries: 1
-    health_timeout: 300
+    health_timeout: 60
     extra_args:
       - "--mmproj"
       - "~/models/llm/Qwen3.6-27B-mmproj-F16.gguf"
@@ -86,7 +86,7 @@ backends:
     backend: qwen3-1.7b
     model: ~/.cache/crispasr/qwen3-asr-1.7b-q4_k.gguf
     port: 9000
-    vram_usage: 2.5
+    vram_usage: 4
     health_timeout: 30
 
   qwen3-asr-1.7b-cpu:
@@ -96,7 +96,7 @@ backends:
     model: ~/.cache/crispasr/qwen3-asr-1.7b-q4_k.gguf
     port: 9001
     cpu: true
-    ram_usage: 3.0
+    ram_usage: 4
     health_timeout: 30
 
   qwen-talker-1.7b-customvoice:
@@ -106,7 +106,7 @@ backends:
     model: ~/models/tts/qwen-talker-1.7b-customvoice-Q8_0.gguf
     codec_model: ~/models/tts/qwen3-tts-tokenizer-12hz-q8_0.gguf
     port: 9002
-    vram_usage: 2.5
+    vram_usage: 4
     health_timeout: 30
 
   qwen-talker-1.7b-customvoice-cpu:
@@ -127,7 +127,7 @@ backends:
     model: ~/models/tts/qwen-talker-1.7b-voicedesign-Q8_0.gguf
     codec_model: ~/models/tts/qwen3-tts-tokenizer-12hz-q8_0.gguf
     port: 9004
-    vram_usage: 2.5
+    vram_usage: 6
     health_timeout: 60
     retries: 2
 
@@ -139,7 +139,7 @@ backends:
     codec_model: ~/models/tts/qwen3-tts-tokenizer-12hz-q8_0.gguf
     port: 9005
     cpu: true
-    ram_usage: 3.0
+    ram_usage: 6.0
     health_timeout: 30
 
   image:
@@ -151,8 +151,8 @@ backends:
     vram_usage: 3         # Torch CUDA context + ComfyUI overhead
     output_dir: ~/stable_diffusion/ComfyUI/output
     retries: 1
-    health_timeout: 180
+    health_timeout: 60
     models:
       krea2:
         workflow: ~/projectnotes/untracked/Krea2 Basic.json
-        vram_usage: 17    # unet 13G + vae 0.5G + clip (partially offloaded)
+        vram_usage: 28

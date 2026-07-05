@@ -146,7 +146,15 @@ try:
         # Try JSON first, then SSE
         try:
             data = r.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            # Anthropic format: {"content": [{"type": "text", "text": "..."}]}
+            content = ""
+            if "content" in data and isinstance(data["content"], list):
+                for item in data["content"]:
+                    if item.get("type") == "text":
+                        content += item.get("text", "")
+            # OpenAI format: {"choices": [{"message": {"content": "..."}}]}
+            if not content:
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         except Exception:
             content = parse_sse_content(r.text)
         run("Got non-empty content", len(content) > 0, f"content='{content[:80]}'")
@@ -256,11 +264,15 @@ except Exception as e:
 # ──────────────────────────────────────────────────────────────
 header("11. POST /v1/translate  —  CrispASR translation")
 try:
+    import base64
     with open(AUDIO_FILE, "rb") as f:
-        files = {"file": ("roundtable_en.wav", f, "audio/wav")}
-        data = {"model": "qwen3-asr-1.7b", "target_lang": "en"}
-        r = requests.post(f"{BASE}/v1/translate",
-                          files=files, data=data, timeout=60)
+        audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+    payload = {
+        "model": "qwen3-asr-1.7b",
+        "target_lang": "en",
+        "input": audio_b64,
+    }
+    r = requests.post(f"{BASE}/v1/translate", json=payload, timeout=60)
     run("Returns 2xx", 200 <= r.status_code < 300,
         f"status={r.status_code}, body={r.text[:200]}")
 except Exception as e:
