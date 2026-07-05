@@ -5,18 +5,18 @@ Owns one ServiceLoader per configured backend and implements the core
 router workflow:
 
   1. ensure_running(name): health-check the target; relaunch if dead.
-  2. Before launching, check the VRAM budget:
-         available = total_vram - reserve - sum(tracked usage of running backends)
+  2. Before launching, check the VRAM budget using per-process accounting:
+         available = total_vram - reserve - sum(per-process VRAM of running backends)
   3. If insufficient, evict running backends smallest-first (confirming
-     VRAM is actually freed after each) until the target fits.
+     each process actually freed VRAM) until the target fits.
   4. Launch with configurable retries (ServiceConfig.retries).
 
 Warm-by-default: backends are never stopped except under VRAM pressure
 or on shutdown().
 
-If nvidia-smi is unavailable, budgeting falls back to tracked bookkeeping
-(sum of declared/measured values) and eviction confirmation is skipped —
-per the plan, we launch anyway and let the OS handle OOM.
+VRAM accounting uses nvidia-smi --query-compute-apps for authoritative
+per-process readings. If nvidia-smi is unavailable, falls back to
+tracked bookkeeping (sum of declared/measured values).
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,8 @@ from service_loader import (
     ServiceLoader,
     ServiceState,
     query_vram_used_gb,
+    query_vram_total_gb,
+    query_per_process_vram,
 )
 
 
@@ -70,8 +73,9 @@ class Orchestrator:
     """
     Coordinates multiple ServiceLoaders under shared VRAM and sysram budgets.
 
-    GPU backends are budgeted against VRAM (nvidia-smi); CPU backends are
-    budgeted against system RAM (/proc/meminfo).  Each is tracked independently.
+    GPU backends are budgeted against VRAM using per-process accounting
+    (nvidia-smi --query-compute-apps); CPU backends are budgeted against
+    system RAM (/proc/meminfo).  Each is tracked independently.
 
     Usage:
         orch = Orchestrator(configs, total_vram_gb=48, vram_reserve_gb=2)
@@ -107,8 +111,8 @@ class Orchestrator:
     # ── VRAM accounting ──────────────────────────────────────────────────
 
     def _tracked_vram(self, loader: ServiceLoader) -> float:
-        """VRAM attributed to a service: measured if available, else declared,
-        plus any on-demand model VRAM (ComfyUI)."""
+        """VRAM attributed to a service: per-process measurement if available,
+        else declared value, plus any on-demand model VRAM (ComfyUI)."""
         if loader.actual_vram_gb is not None and loader.actual_vram_gb > 0:
             base = loader.actual_vram_gb
         else:
@@ -158,8 +162,30 @@ class Orchestrator:
         """
         VRAM available for a new backend.
 
-        Prefers a real nvidia-smi reading; falls back to tracked bookkeeping.
+        Uses per-process accounting: total_vram - reserve - sum(per-process VRAM
+        of our managed backends). This is authoritative because it reads exactly
+        what each managed process holds, ignoring unmanaged GPU consumers
+        (Xorg, Steam, etc.).
+
+        Falls back to nvidia-smi total reading if per-process data is unavailable.
         """
+        # Try per-process accounting first.
+        per_pid = await query_per_process_vram()
+        if per_pid:
+            # Sum VRAM of our managed backends by PID.
+            our_vram = 0.0
+            for loader in self._running():
+                pid = loader.pid
+                if pid is not None:
+                    our_vram += per_pid.get(pid, 0.0)
+                else:
+                    # Fallback for backends without PID (shouldn't happen for alive processes)
+                    our_vram += self._tracked_vram(loader)
+            # Add extra VRAM (ComfyUI model VRAM).
+            our_vram += sum(self._extra_vram.values())
+            return self.total_vram_gb - self.vram_reserve_gb - our_vram
+
+        # Fallback: total nvidia-smi reading minus reserve.
         used = await query_vram_used_gb()
         if used is None:
             used = sum(self._tracked_vram(s) for s in self._running())
@@ -285,7 +311,7 @@ class Orchestrator:
             self._extra_vram.pop(victim.config.name, None)
 
             if not cpu:
-                await self._confirm_vram_freed(available + freed)
+                await self._confirm_vram_freed(victim.pid, freed)
                 available = await self.available_vram_gb()
             else:
                 available = await self.available_sysram_gb()
@@ -299,25 +325,62 @@ class Orchestrator:
                 f"need {needed_gb:.1f} GB"
             )
 
-    async def _confirm_vram_freed(self, expected_available: float) -> None:
+    async def _confirm_vram_freed(self, pid: int | None, expected_freed_gb: float) -> None:
         """
-        Poll nvidia-smi until available VRAM reaches roughly the expected level.
+        Confirm the evicted process has actually released its VRAM.
 
-        Best-effort: logs a warning on timeout, skips silently without nvidia-smi.
+        Polls nvidia-smi --query-compute-apps to verify the PID is gone.
+        If the PID persists beyond the timeout, it is force-killed.
+
+        Args:
+            pid: The PID of the evicted process (may be None if it exited before we checked).
+            expected_freed_gb: Approximate VRAM that should have been freed.
         """
-        if await query_vram_used_gb() is None:
-            return  # No GPU telemetry — tracked bookkeeping already updated.
+        if pid is None:
+            return  # Process already exited.
+
+        per_pid = await query_per_process_vram()
+        if not per_pid:
+            return  # No GPU telemetry — trust the stop.
+
+        # Check if the PID is still consuming VRAM.
+        if pid not in per_pid:
+            return  # Already freed.
+
+        logger.warning(
+            "Evicted process PID %d still holding %.1f GB VRAM — waiting for release",
+            pid, per_pid[pid],
+        )
 
         deadline = time.monotonic() + EVICTION_CONFIRM_TIMEOUT
         while time.monotonic() < deadline:
-            available = await self.available_vram_gb()
-            if available >= expected_available - 1.0:  # 1 GB tolerance
-                return
             await asyncio.sleep(EVICTION_CONFIRM_INTERVAL)
-        logger.warning(
-            "Eviction VRAM not fully freed after %.0fs (expected ~%.1f GB available)",
-            EVICTION_CONFIRM_TIMEOUT, expected_available,
+            check = await query_per_process_vram()
+            if not check or pid not in check:
+                logger.info("Evicted process PID %d released VRAM", pid)
+                return
+
+        # PID still present after timeout — force kill it.
+        logger.error(
+            "Evicted process PID %d still holding VRAM after %.0fs — force-killing",
+            pid, EVICTION_CONFIRM_TIMEOUT,
         )
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            # Wait briefly for the kill to take effect.
+            await asyncio.sleep(1.0)
+            final = await query_per_process_vram()
+            if final and pid in final:
+                logger.error(
+                    "Process PID %d still alive after SIGKILL — VRAM may be leaked",
+                    pid,
+                )
+            else:
+                logger.info("Force-killed PID %d, VRAM freed", pid)
+        except ProcessLookupError:
+            logger.info("PID %d no longer exists, VRAM likely freed", pid)
+        except Exception as exc:
+            logger.error("Failed to force-kill PID %d: %s", pid, exc)
 
     # ── Status & shutdown ────────────────────────────────────────────────
 

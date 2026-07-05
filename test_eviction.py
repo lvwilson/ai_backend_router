@@ -12,6 +12,7 @@ Fixes applied:
   2. stop() resets VRAM tracking on all exit paths
   3. _force_kill() resets VRAM tracking on all exit paths
   4. _cleanup_process() now force-kills running processes (not just wait)
+  5. VRAM accounting uses per-process nvidia-smi readings (authoritative)
 
 Tests use `python3 -m http.server` as the backend so health checks pass.
 """
@@ -107,9 +108,8 @@ class TestZombieProcessCleanup(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         pid = loader.pid
 
-        # Simulate measured VRAM
+        # Simulate measured VRAM (per-process accounting stores in actual_vram_gb)
         loader._actual_vram_gb = 5.5
-        loader._vram_before_start = 10.0
 
         # Force-kill with mocked timeout
         loader._state = ServiceState.STOPPING
@@ -126,8 +126,6 @@ class TestZombieProcessCleanup(unittest.IsolatedAsyncioTestCase):
         # VRAM tracking must be reset despite zombie
         self.assertIsNone(loader._actual_vram_gb,
                           "VRAM tracking should be reset on force-kill timeout")
-        self.assertIsNone(loader._vram_before_start,
-                          "Pre-start VRAM should be reset on force-kill timeout")
 
         # OS process is still alive (mock never resolved)
         os.kill(pid, 0)
@@ -148,14 +146,11 @@ class TestZombieProcessCleanup(unittest.IsolatedAsyncioTestCase):
 
         # Simulate measured VRAM
         loader._actual_vram_gb = 5.5
-        loader._vram_before_start = 10.0
 
         await loader.stop()
 
         self.assertIsNone(loader._actual_vram_gb,
                           "actual_vram_gb should be None after stop")
-        self.assertIsNone(loader._vram_before_start,
-                          "vram_before_start should be None after stop")
 
 
 class TestEvictionVRAMConfirmation(unittest.IsolatedAsyncioTestCase):
@@ -243,8 +238,8 @@ class TestVRAMAccounting(unittest.IsolatedAsyncioTestCase):
 
     async def test_vram_reset_after_stop_allows_fresh_measurement(self):
         """
-        After stop(), the next start() should measure VRAM delta from
-        a fresh pre-start snapshot, not from stale data.
+        After stop(), the next start() should measure VRAM from a fresh
+        per-process reading, not from stale data.
         """
         config = _http_server_config("vram-account")
         loader = ServiceLoader(config)
@@ -258,16 +253,16 @@ class TestVRAMAccounting(unittest.IsolatedAsyncioTestCase):
 
         # VRAM tracking should be reset
         self.assertIsNone(loader._actual_vram_gb)
-        self.assertIsNone(loader._vram_before_start)
 
         # Second cycle — should get fresh measurement
         ok2 = await loader.start()
         self.assertTrue(ok2)
         vram_after_second = loader._actual_vram_gb
 
-        # Measurement should be non-negative (http.server uses negligible VRAM)
-        self.assertIsNotNone(vram_after_second)
-        self.assertGreaterEqual(vram_after_second, 0)
+        # http.server doesn't use GPU, so actual_vram_gb may be None.
+        # But if it is set, it should be non-negative.
+        if vram_after_second is not None:
+            self.assertGreaterEqual(vram_after_second, 0)
 
         await loader.stop()
 
@@ -281,8 +276,9 @@ class TestVRAMAccounting(unittest.IsolatedAsyncioTestCase):
         for i in range(3):
             ok = await loader.start()
             self.assertTrue(ok, f"Start cycle {i} should succeed")
-            self.assertIsNotNone(loader._actual_vram_gb,
-                                 f"VRAM should be measured after start cycle {i}")
+            # http.server may not have GPU VRAM, so actual_vram_gb can be None.
+            # The key invariant is that it's reset after stop.
+            vram_before_stop = loader._actual_vram_gb
             await loader.stop()
             self.assertIsNone(loader._actual_vram_gb,
                               f"VRAM should be reset after stop cycle {i}")

@@ -93,7 +93,7 @@ except Exception as e:
 header("3. POST /v1/chat/completions  —  LLM passthrough (streamed)")
 try:
     payload = {
-        "model": "qwen3.6-27b",
+        "model": "qwen3.6-27b-instruct",
         "messages": [{"role": "user", "content": "Say hello in three words."}],
         "max_tokens": 20,
         "stream": True,
@@ -114,7 +114,7 @@ except Exception as e:
 header("4. POST /v1/chat/completions  —  LLM passthrough (non-streamed)")
 try:
     payload = {
-        "model": "qwen3.6-27b",
+        "model": "qwen3.6-27b-instruct",
         "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
         "max_tokens": 10,
         "stream": False,
@@ -136,7 +136,7 @@ except Exception as e:
 header("5. POST /v1/messages  —  Anthropic-style passthrough")
 try:
     payload = {
-        "model": "qwen3.6-27b",
+        "model": "qwen3.6-27b-instruct",
         "messages": [{"role": "user", "content": "Say hi briefly."}],
         "max_tokens": 20,
     }
@@ -201,7 +201,7 @@ except Exception as e:
 header("8. POST /v1/audio/speech  —  CrispASR TTS (GPU)")
 try:
     payload = {
-        "model": "qwen-talker-1.7b-customvoice",
+        "model": "qwen-talker-1.7b-voicedesign",
         "input": "Hello, this is a test of the text-to-speech system.",
     }
     r = requests.post(f"{BASE}/v1/audio/speech", json=payload, timeout=60)
@@ -237,7 +237,7 @@ header("10. POST /v1/audio/speech-to-speech  —  CrispASR S2S")
 try:
     with open(AUDIO_FILE, "rb") as f:
         files = {"file": ("roundtable_en.wav", f, "audio/wav")}
-        data = {"model": "qwen-talker-1.7b-customvoice"}
+        data = {"model": "qwen-talker-1.7b-voicedesign"}
         r = requests.post(f"{BASE}/v1/audio/speech-to-speech",
                           files=files, data=data, timeout=60)
     run("Returns 2xx", 200 <= r.status_code < 300,
@@ -258,7 +258,7 @@ header("11. POST /v1/translate  —  CrispASR translation")
 try:
     with open(AUDIO_FILE, "rb") as f:
         files = {"file": ("roundtable_en.wav", f, "audio/wav")}
-        data = {"model": "qwen3-asr-1.7b"}
+        data = {"model": "qwen3-asr-1.7b", "target_lang": "en"}
         r = requests.post(f"{BASE}/v1/translate",
                           files=files, data=data, timeout=60)
     run("Returns 2xx", 200 <= r.status_code < 300,

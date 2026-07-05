@@ -183,6 +183,12 @@ def create_app(config: RouterConfig) -> FastAPI:
     async def voices(request: Request):
         if not config.audio_backends:
             return error(400, "No audio backends configured")
+        # Route to the first TTS-capable backend (customvoice or voicedesign).
+        # STT-only backends (qwen3-asr-*) don't support /v1/voices.
+        for name in config.audio_backends:
+            if "talker" in name.lower() or "tts" in name.lower():
+                return await proxy(request, name)
+        # Fallback: try the first backend
         return await proxy(request, config.audio_backends[0])
 
     # ── Image route (translated) ─────────────────────────────────────────

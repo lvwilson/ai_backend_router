@@ -66,7 +66,9 @@ class RouterConfig:
             return model
         if not self.llama_backends:
             raise KeyError("No llama backends configured")
-        return self.llama_backends[0]  # Default: first configured
+        if model is not None:
+            raise KeyError(f"Unknown model '{model}' — available: {', '.join(self.llama_backends)}")
+        return self.llama_backends[0]  # Default when model field is omitted
 
     def resolve_audio(self, model: str | None) -> str:
         """Map a request's `model` field to a crispasr backend name."""
