@@ -46,7 +46,7 @@ backends:
     type: crispasr
     binary: ~/CrispASR/build/bin/crispasr
     backend: qwen3-1.7b
-    model: ~/models/stt/Qwen3-ASR-1.7B-Q8_0.gguf
+    model: ~/.cache/crispasr/qwen3-asr-1.7b-q4_k.gguf
     port: 9000
     vram_usage: 2.5
     health_timeout: 30
@@ -55,7 +55,7 @@ backends:
     type: crispasr
     binary: ~/CrispASR/build/bin/crispasr
     backend: qwen3-1.7b
-    model: ~/models/stt/Qwen3-ASR-1.7B-Q8_0.gguf
+    model: ~/.cache/crispasr/qwen3-asr-1.7b-q4_k.gguf
     port: 9001
     cpu: true
     ram_usage: 3.0
