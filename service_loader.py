@@ -345,6 +345,55 @@ class ServiceLoader:
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
+    async def _check_port_conflict(self) -> None:
+        """
+        Before launching, verify that our configured port is available or
+        already held by our own process. Warn if an unrelated process
+        occupies it — this catches config errors (e.g. two services sharing
+        a port, or a port claimed by an external service).
+        """
+        port = self.config.port
+        if port is None:
+            return
+
+        # If we own a live process, the port is ours — no conflict.
+        if self._process is not None and self._process.returncode is None:
+            return
+
+        # Check what (if anything) is listening on our port.
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ss", "-tlnp", f"sport = :{port}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            lines = [l for l in stdout.decode().strip().splitlines() if l.strip() and not l.startswith("State")]
+            if not lines:
+                return  # Port is free — no conflict.
+
+            # Parse the process info from ss output, e.g.:
+            #   users:(("llama-server",pid=12345,fd=40))
+            import re
+            m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', lines[-1])
+            if m:
+                other_name, other_pid = m.group(1), int(m.group(2))
+                # Check if it's our own binary (e.g. same llama-server on restart).
+                our_binary = Path(self.config.binary).name
+                if other_name == our_binary:
+                    logger.debug(
+                        "[%s] Port %d held by our own binary '%s' (PID %d) — likely restarting",
+                        self.config.name, port, other_name, other_pid,
+                    )
+                else:
+                    logger.warning(
+                        "[%s] Port %d occupied by '%s' (PID %d) — "
+                        "config conflict or stale process. Our binary: '%s'",
+                        self.config.name, port, other_name, other_pid, our_binary,
+                    )
+        except Exception as exc:
+            logger.debug("[%s] Port conflict check skipped: %s", self.config.name, exc)
+
     async def start(self) -> bool:
         """
         Launch the backend process and wait for it to become healthy.
@@ -375,6 +424,9 @@ class ServiceLoader:
         self._state = ServiceState.STARTING
         self._started_at = None
         self.reset_vram_tracking()
+
+        # Check for port conflicts before launching.
+        await self._check_port_conflict()
 
         # Build environment
         env = os.environ.copy()

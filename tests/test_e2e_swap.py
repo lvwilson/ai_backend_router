@@ -22,9 +22,11 @@ Run: python tests/test_e2e_swap.py
 import asyncio
 import json
 import os
+import signal
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import aiohttp
@@ -50,6 +52,34 @@ async def _no_per_process_vram(*args, **kwargs):
 
 MOCK = HERE / "mock_backend.py"
 WORKFLOW = HERE / "krea2_basic.json"
+
+# Ports used by mock backends in this test — isolated from live backends.
+MOCK_PORTS = [18081, 18082, 18083]
+
+
+def _kill_stale_mocks() -> None:
+    """
+    Kill any leftover mock_backend processes from a previous test run.
+
+    Mock backends run on ports 18081–18083, completely separate from live
+    backends (8080, 8082, 9000–9005, 8188). This ensures stale processes
+    from a crashed test don't block the next run.
+    """
+    import subprocess
+    result = subprocess.run(
+        ["pgrep", "-f", str(MOCK)],
+        capture_output=True, text=True,
+    )
+    pids = result.stdout.strip().split()
+    for pid in pids:
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except (ProcessLookupError, ValueError):
+            pass
+    if pids:
+        # Brief pause to let the kernel release ports.
+        time.sleep(0.5)
+
 
 CONFIG_TEMPLATE = """
 router:
@@ -123,6 +153,9 @@ async def main() -> int:
 
 
 async def _run() -> int:
+    # Clean up stale mock backends from previous runs (ports 18081–18083).
+    _kill_stale_mocks()
+
     outdir = tempfile.mkdtemp(prefix="router_e2e_")
     cfg_file = Path(outdir) / "config.yaml"
     cfg_file.write_text(CONFIG_TEMPLATE.format(mock=MOCK, outdir=outdir, workflow=WORKFLOW))
