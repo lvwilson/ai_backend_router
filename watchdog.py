@@ -19,7 +19,6 @@ import logging
 import os
 import signal
 import sys
-import time
 from pathlib import Path
 
 logger = logging.getLogger("watchdog")
@@ -28,9 +27,12 @@ SHUTDOWN_DELAY = 1.0       # Seconds between restart attempts
 CONFIG_POLL_INTERVAL = 5.0 # Seconds between config change checks
 
 
-async def run_router(config_path: str) -> int:
+async def run_router(config_path: str, stop: asyncio.Future) -> int:
     """
     Launch the router as a subprocess and wait for it to exit.
+
+    If `stop` is set while the router is running, sends SIGTERM to the
+    router's process group and waits for it to exit.
 
     Returns the exit code.
     """
@@ -51,7 +53,25 @@ async def run_router(config_path: str) -> int:
                 if text:
                     logger.debug("router: %s", text)
 
-    await asyncio.gather(proc.wait(), tail_stderr())
+    try:
+        await asyncio.gather(proc.wait(), tail_stderr())
+    except asyncio.CancelledError:
+        # Shutdown requested while waiting — terminate the router process group.
+        logger.info("Shutting down router process group (PGID=%d)...", proc.pid)
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        # Give it a moment to exit gracefully.
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.info("Router didn't exit in 5s, sending SIGKILL")
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await proc.wait()
 
     logger.info("Router exited with code %d", proc.returncode)
     return proc.returncode or 0
@@ -75,10 +95,15 @@ async def main() -> None:
 
     loop = asyncio.get_event_loop()
     stop = loop.create_future()
+    current_task: asyncio.Task | None = None
 
     def handle_signal(sig, frame):
+        nonlocal current_task
         if not stop.done():
             stop.set_result(None)
+            # Cancel the currently running router task so it can clean up.
+            if current_task is not None and not current_task.done():
+                current_task.cancel()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
@@ -96,7 +121,15 @@ async def main() -> None:
         except OSError:
             pass
 
-        exit_code = await run_router(config_path)
+        # Run the router in a cancellable task.
+        current_task = asyncio.ensure_future(run_router(config_path, stop))
+        try:
+            exit_code = await current_task
+        except asyncio.CancelledError:
+            # Shutdown requested — run_router already terminated the process group.
+            break
+
+        current_task = None
         restart_requested = False  # Config was loaded fresh
 
         if stop.done():
@@ -106,9 +139,11 @@ async def main() -> None:
         # Exit code 0 from SIGTERM is intentional shutdown — but since we're
         # the watchdog, any exit triggers a restart (unless we're stopping).
         logger.info("Restarting router in %.1fs...", SHUTDOWN_DELAY)
-        await asyncio.sleep(SHUTDOWN_DELAY)
+        try:
+            await asyncio.wait_for(asyncio.sleep(SHUTDOWN_DELAY), timeout=None)
+        except asyncio.CancelledError:
+            break
 
-    # Propagate shutdown to the router process group if it's running.
     logger.info("Watchdog shutting down")
 
 
