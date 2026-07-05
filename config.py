@@ -111,6 +111,9 @@ def _llama_service(name: str, spec: dict, cache_dir: str | None = None) -> Servi
             )
             slot_save_path = None
 
+    # Detect multimodal: llama-server returns 501 for slot cache on multimodal models.
+    is_multimodal = "--mmproj" in spec.get("extra_args", [])
+
     return ServiceConfig(
         name=name,
         binary=spec.get("binary", "llama-server"),
@@ -121,6 +124,7 @@ def _llama_service(name: str, spec: dict, cache_dir: str | None = None) -> Servi
         expected_vram_gb=spec.get("vram_usage", 0.0),
         retries=spec.get("retries", 1),
         slot_save_path=slot_save_path,
+        is_multimodal=is_multimodal,
     )
 
 
