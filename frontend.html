@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Router — Interactive Test Console</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
+    --text: #e2e4ea; --muted: #8b8fa3; --accent: #6c8cff;
+    --accent2: #a78bfa; --green: #34d399; --red: #f87171;
+    --yellow: #fbbf24; --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  /* Header */
+  .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .header h1 { font-size: 18px; font-weight: 600; white-space: nowrap; }
+  .header h1 span { color: var(--accent); }
+  .url-bar { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 250px; }
+  .url-bar label { font-size: 13px; color: var(--muted); white-space: nowrap; }
+  .url-bar input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: var(--radius); font-size: 13px; font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+  .url-bar input:focus { outline: none; border-color: var(--accent); }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); transition: background 0.3s; }
+  .status-dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .status-dot.offline { background: var(--red); }
+
+  /* Layout */
+  .container { display: flex; height: calc(100vh - 53px); }
+  .sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; flex-shrink: 0; }
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Sidebar */
+  .sidebar-section { padding: 12px 0; }
+  .sidebar-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); padding: 4px 16px 6px; }
+  .endpoint-btn { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 16px; border: none; background: none; color: var(--text); font-size: 13px; cursor: pointer; text-align: left; transition: background 0.15s; }
+  .endpoint-btn:hover { background: rgba(108,140,255,0.08); }
+  .endpoint-btn.active { background: rgba(108,140,255,0.15); color: var(--accent); }
+  .endpoint-btn .method { font-size: 10px; font-weight: 700; padding: 2px 5px; border-radius: 3px; font-family: monospace; min-width: 32px; text-align: center; }
+  .method.get { background: rgba(52,211,153,0.15); color: var(--green); }
+  .method.post { background: rgba(167,139,250,0.15); color: var(--accent2); }
+  .endpoint-btn .path { font-family: 'JetBrains Mono', monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Content area */
+  .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .panel { padding: 20px 24px; overflow-y: auto; flex: 1; }
+  .panel h2 { font-size: 16px; margin-bottom: 4px; }
+  .panel .desc { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
+
+  /* Forms */
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .field input, .field select, .field textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: var(--radius); font-size: 13px; font-family: 'JetBrains Mono', monospace; }
+  .field textarea { min-height: 80px; resize: vertical; }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--accent); }
+  .field .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .field-row { display: flex; gap: 12px; }
+  .field-row .field { flex: 1; }
+  .field select { cursor: pointer; }
+  .field select option { background: var(--surface); }
+
+  /* Buttons */
+  .btn { padding: 8px 18px; border: none; border-radius: var(--radius); font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: #5a7aee; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+  .timer { font-size: 12px; color: var(--muted); font-family: monospace; margin-left: 8px; }
+
+  /* Response area */
+  .response-area { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-top: 16px; overflow: hidden; }
+  .response-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .response-header .status { font-weight: 700; font-family: monospace; }
+  .response-header .status.s2xx { color: var(--green); }
+  .response-header .status.s4xx { color: var(--yellow); }
+  .response-header .status.s5xx { color: var(--red); }
+  .response-body { padding: 14px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; overflow-x: auto; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; }
+  .response-body img { max-width: 100%; border-radius: var(--radius); margin-top: 8px; }
+  .response-body audio { width: 100%; margin-top: 8px; }
+  .response-body .stream-chunk { color: var(--accent); }
+
+  /* Welcome */
+  .welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; color: var(--muted); }
+  .welcome svg { margin-bottom: 16px; opacity: 0.3; }
+  .welcome p { font-size: 14px; }
+
+  /* Checkbox */
+  .check { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+  .check input { accent-color: var(--accent); }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🔀 <span>Router</span> Console</h1>
+  <div class="url-bar">
+    <label>Base URL</label>
+    <input type="text" id="baseUrl" value="http://127.0.0.1:8000" />
+  </div>
+  <div class="status-dot" id="statusDot" title="Offline"></div>
+</div>
+
+<div class="container">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="main">
+    <div class="content" id="content">
+      <div class="welcome">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        <p>Select an endpoint from the sidebar to begin testing.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Endpoint definitions ──────────────────────────────────────────────
+const ENDPOINTS = [
+  {
+    section: "Operations",
+    items: [
+      { id: "status", method: "GET", path: "/status", desc: "Orchestrator fleet status with VRAM info" },
+      { id: "models", method: "GET", path: "/v1/models", desc: "List all available models across backends" },
+    ]
+  },
+  {
+    section: "LLM (Chat)",
+    items: [
+      {
+        id: "chat-stream", method: "POST", path: "/v1/chat/completions",
+        desc: "OpenAI-style chat completions (streamed)",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "llama", default: "qwen3.6-27b-instruct" },
+          { name: "messages", type: "textarea", label: "Messages (JSON array)", default: JSON.stringify([{"role":"user","content":"Explain quantum computing in one sentence."}], null, 2) },
+          { name: "max_tokens", type: "number", label: "Max Tokens", default: 128 },
+          { name: "stream", type: "checkbox", label: "Stream", default: true },
+        ]
+      },
+      {
+        id: "chat-nostream", method: "POST", path: "/v1/chat/completions",
+        desc: "OpenAI-style chat completions (non-streamed)",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "llama", default: "qwen3.6-27b-instruct" },
+          { name: "messages", type: "textarea", label: "Messages (JSON array)", default: JSON.stringify([{"role":"user","content":"What is the capital of France?"}], null, 2) },
+          { name: "max_tokens", type: "number", label: "Max Tokens", default: 64 },
+          { name: "stream", type: "checkbox", label: "Stream", default: false },
+        ]
+      },
+      {
+        id: "messages", method: "POST", path: "/v1/messages",
+        desc: "Anthropic-style messages endpoint",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "llama", default: "qwen3.6-27b-instruct" },
+          { name: "messages", type: "textarea", label: "Messages (JSON array)", default: JSON.stringify([{"role":"user","content":"Hello, who are you?"}], null, 2) },
+          { name: "max_tokens", type: "number", label: "Max Tokens", default: 128 },
+        ]
+      },
+    ]
+  },
+  {
+    section: "Audio (STT / TTS)",
+    items: [
+      {
+        id: "stt", method: "POST", path: "/v1/audio/transcriptions",
+        desc: "Speech-to-text via CrispASR",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "stt", default: "qwen3-asr-1.7b" },
+          { name: "file", type: "file", label: "Audio File (.wav, .mp3, etc.)", accept: "audio/*" },
+        ]
+      },
+      {
+        id: "tts", method: "POST", path: "/v1/audio/speech",
+        desc: "Text-to-speech via CrispASR",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "tts", default: "qwen-talker-1.7b-customvoice" },
+          { name: "input", type: "textarea", label: "Text to synthesize", default: "Hello, this is a test of the text-to-speech system." },
+        ]
+      },
+      {
+        id: "voices", method: "GET", path: "/v1/voices",
+        desc: "List available voices from TTS backend" },
+    ]
+  },
+  {
+    section: "Image Generation",
+    items: [
+      {
+        id: "image", method: "POST", path: "/v1/images/generations",
+        desc: "Generate images via ComfyUI",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "image", default: "krea2" },
+          { name: "prompt", type: "textarea", label: "Prompt", default: "A serene mountain lake at sunrise, photorealistic, golden hour lighting" },
+          { name: "negative_prompt", type: "text", label: "Negative Prompt", default: "blurry, low quality, distorted" },
+          { name: "size", type: "text", label: "Size", default: "512x512" },
+          { name: "n", type: "number", label: "Count", default: 1 },
+          { name: "steps", type: "number", label: "Steps (optional)", default: "" },
+          { name: "cfg", type: "number", label: "CFG Scale (optional)", default: "" },
+          { name: "seed", type: "number", label: "Seed (optional, -1=random)", default: "" },
+        ]
+      },
+    ]
+  },
+  {
+    section: "Errors",
+    items: [
+      {
+        id: "err-model", method: "POST", path: "/v1/chat/completions",
+        desc: "Test: unknown model → 400",
+        fields: [
+          { name: "model", type: "text", label: "Model", default: "nonexistent-model" },
+          { name: "messages", type: "textarea", label: "Messages", default: JSON.stringify([{"role":"user","content":"hi"}], null, 2) },
+        ]
+      },
+      {
+        id: "err-image", method: "POST", path: "/v1/images/generations",
+        desc: "Test: missing prompt → 400",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "image", default: "krea2" },
+        ]
+      },
+    ]
+  },
+];
+
+// ── State ─────────────────────────────────────────────────────────────
+let activeEndpoint = null;
+let modelCache = { llama: [], stt: [], tts: [], image: [] };
+
+// ── Build sidebar ─────────────────────────────────────────────────────
+function buildSidebar() {
+  const sidebar = document.getElementById("sidebar");
+  sidebar.innerHTML = "";
+  for (const section of ENDPOINTS) {
+    const div = document.createElement("div");
+    div.className = "sidebar-section";
+    div.innerHTML = `<div class="sidebar-label">${section.section}</div>`;
+    for (const ep of section.items) {
+      const btn = document.createElement("button");
+      btn.className = "endpoint-btn";
+      btn.dataset.id = ep.id;
+      btn.innerHTML = `<span class="method ${ep.method.toLowerCase()}">${ep.method}</span><span class="path">${ep.path}</span>`;
+      btn.onclick = () => selectEndpoint(ep);
+      div.appendChild(btn);
+    }
+    sidebar.appendChild(div);
+  }
+}
+
+function selectEndpoint(ep) {
+  activeEndpoint = ep;
+  document.querySelectorAll(".endpoint-btn").forEach(b => b.classList.toggle("active", b.dataset.id === ep.id));
+  renderPanel(ep);
+}
+
+// ── Render panel ──────────────────────────────────────────────────────
+function renderPanel(ep) {
+  const content = document.getElementById("content");
+  let html = `<div class="panel"><h2>${ep.method} ${ep.path}</h2><p class="desc">${ep.desc}</p>`;
+
+  if (ep.fields) {
+    for (const f of ep.fields) {
+      const val = f.default !== undefined ? f.default : "";
+      html += `<div class="field"><label>${f.label}</label>`;
+      if (f.type === "textarea") {
+        html += `<textarea id="f_${f.name}">${escHtml(String(val))}</textarea>`;
+      } else if (f.type === "select") {
+        html += `<select id="f_${f.name}"><option value="">(load models…)</option></select><div class="hint">Populated from /v1/models</div>`;
+      } else if (f.type === "checkbox") {
+        html += `<label class="check"><input type="checkbox" id="f_${f.name}" ${val ? "checked" : ""} /> ${f.label}</label>`;
+      } else if (f.type === "file") {
+        html += `<input type="file" id="f_${f.name}" ${f.accept ? `accept="${f.accept}"` : ""} />`;
+      } else {
+        html += `<input type="${f.type === "number" ? "number" : "text"}" id="f_${f.name}" value="${escHtml(String(val))}" />`;
+      }
+      html += `</div>`;
+    }
+  }
+
+  html += `<div class="btn-row"><button class="btn btn-primary" id="sendBtn" onclick="sendRequest()">Send</button><span class="timer" id="timer"></span></div>`;
+  html += `<div class="response-area" id="respArea" style="display:none"><div class="response-header"><span class="status" id="respStatus"></span><span id="respMeta"></span></div><div class="response-body" id="respBody"></div></div>`;
+  html += `</div>`;
+  content.innerHTML = html;
+
+  // Populate model selects from cache
+  setTimeout(() => populateSelects(ep), 50);
+}
+
+function populateSelects(ep) {
+  if (!ep.fields) return;
+  for (const f of ep.fields) {
+    if (f.type !== "select") continue;
+    const sel = document.getElementById(`f_${f.name}`);
+    if (!sel) continue;
+    const list = modelCache[f.options] || [];
+    sel.innerHTML = "";
+    for (const m of list) {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = m;
+      sel.appendChild(opt);
+    }
+    // Set default
+    const def = f.default || (list[0] || "");
+    sel.value = def;
+  }
+}
+
+// ── Fetch models ──────────────────────────────────────────────────────
+async function fetchModels() {
+  const base = document.getElementById("baseUrl").value.replace(/\/+$/, "");
+  try {
+    const r = await fetch(`${base}/v1/models`);
+    if (!r.ok) return false;
+    const data = await r.json();
+    modelCache.llama = [];
+    modelCache.stt = [];
+    modelCache.tts = [];
+    modelCache.image = [];
+    for (const m of data.data) {
+      if (m.owned_by === "llama") modelCache.llama.push(m.id);
+      else if (m.owned_by === "crispasr") {
+        if (m.id.includes("asr") || m.id.includes("transcription")) modelCache.stt.push(m.id);
+        else modelCache.tts.push(m.id);
+      }
+      else if (m.owned_by === "comfyui") modelCache.image.push(m.id);
+    }
+    // Also add crispasr to stt+tts combined
+    modelCache.stt = modelCache.stt.length ? modelCache.stt : data.data.filter(m => m.owned_by === "crispasr").map(m => m.id);
+    if (activeEndpoint) populateSelects(activeEndpoint);
+    return true;
+  } catch { return false; }
+}
+
+// ── Send request ──────────────────────────────────────────────────────
+async function sendRequest() {
+  if (!activeEndpoint) return;
+  const ep = activeEndpoint;
+  const base = document.getElementById("baseUrl").value.replace(/\/+$/, "");
+  const btn = document.getElementById("sendBtn");
+  const timer = document.getElementById("timer");
+  const respArea = document.getElementById("respArea");
+  const respStatus = document.getElementById("respStatus");
+  const respMeta = document.getElementById("respMeta");
+  const respBody = document.getElementById("respBody");
+
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  timer.textContent = "";
+  respArea.style.display = "block";
+  respStatus.textContent = "";
+  respMeta.textContent = "";
+  respBody.innerHTML = "";
+
+  const t0 = performance.now();
+
+  try {
+    if (ep.method === "GET") {
+      const r = await fetch(`${base}${ep.path}`);
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showResponse(r, elapsed, respStatus, respMeta, respBody);
+    } else if (ep.id === "stt") {
+      // Multipart form-data for STT
+      const model = document.getElementById("f_model").value;
+      const fileInput = document.getElementById("f_file");
+      if (!fileInput.files.length) throw new Error("No audio file selected");
+      const fd = new FormData();
+      fd.append("file", fileInput.files[0]);
+      fd.append("model", model);
+      const r = await fetch(`${base}${ep.path}`, { method: "POST", body: fd });
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showResponse(r, elapsed, respStatus, respMeta, respBody);
+    } else if (ep.id === "tts") {
+      const model = document.getElementById("f_model").value;
+      const input = document.getElementById("f_input").value;
+      const r = await fetch(`${base}${ep.path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, input }),
+      });
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      // TTS returns audio blob
+      showAudioResponse(r, elapsed, respStatus, respMeta, respBody);
+    } else {
+      // JSON POST — build body from fields
+      const body = buildBody(ep);
+      const streamField = body.stream !== undefined ? body.stream : false;
+      delete body.stream; // stream is handled separately
+
+      const r = await fetch(`${base}${ep.path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (streamField) {
+        const elapsed = showStreamResponse(r, t0, respStatus, respMeta, respBody);
+        return elapsed;
+      }
+
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showResponse(r, elapsed, respStatus, respMeta, respBody);
+    }
+  } catch (e) {
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+    respStatus.textContent = "ERROR";
+    respStatus.className = "status s5xx";
+    respMeta.textContent = `${elapsed}s`;
+    respBody.innerHTML = `<span style="color:var(--red)">${escHtml(String(e))}</span>`;
+  }
+
+  btn.disabled = false;
+  btn.textContent = "Send";
+}
+
+function buildBody(ep) {
+  const body = {};
+  for (const f of ep.fields) {
+    if (f.type === "checkbox") {
+      body[f.name] = document.getElementById(`f_${f.name}`).checked;
+    } else if (f.name === "messages") {
+      try { body[f.name] = JSON.parse(document.getElementById(`f_${f.name}`).value); }
+      catch { body[f.name] = document.getElementById(`f_${f.name}`).value; }
+    } else {
+      const el = document.getElementById(`f_${f.name}`);
+      const v = el.value;
+      if (f.type === "number" && v !== "") body[f.name] = Number(v);
+      else if (v !== "") body[f.name] = v;
+    }
+  }
+  return body;
+}
+
+function showResponse(r, elapsed, statusEl, metaEl, bodyEl) {
+  statusEl.textContent = `${r.status} ${r.statusText}`;
+  statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
+  metaEl.textContent = `${elapsed}s  |  ${r.headers.get("content-type") || "unknown"}`;
+  const ct = r.headers.get("content-type") || "";
+  if (ct.includes("json")) {
+    r.json().then(d => {
+      // Check if this is an image generation response with paths
+      if (Array.isArray(d.data) && d.data.length > 0 && d.data[0].path) {
+        let imgHtml = "";
+        for (const item of d.data) {
+          if (item.path) {
+            // Convert local path to a file:// link and also try to display inline
+            const fileUrl = "file://" + item.path;
+            imgHtml += `<div style="margin-top:12px;"><img src="${fileUrl}" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="max-width:100%;border-radius:var(--radius);"><a href="${fileUrl}" style="color:var(--accent);font-size:12px;">${escHtml(item.path)}</a></div>`;
+          }
+        }
+        bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} image(s) generated</div>${imgHtml}<details style="margin-top:12px;"><summary style="cursor:pointer;font-size:12px;color:var(--muted);">Show raw JSON</summary><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;">${syntaxHighlight(JSON.stringify(d, null, 2))}</pre></details>`;
+      } else {
+        bodyEl.innerHTML = syntaxHighlight(JSON.stringify(d, null, 2));
+      }
+    });
+  } else {
+    r.text().then(t => { bodyEl.innerHTML = escHtml(t); });
+  }
+}
+
+function showAudioResponse(r, elapsed, statusEl, metaEl, bodyEl) {
+  statusEl.textContent = `${r.status} ${r.statusText}`;
+  statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
+  const ct = r.headers.get("content-type") || "audio/wav";
+  metaEl.textContent = `${elapsed}s  |  ${ct}`;
+  if (r.ok) {
+    r.blob().then(blob => {
+      const url = URL.createObjectURL(blob);
+      bodyEl.innerHTML = `<audio controls autoplay src="${url}"></audio><br><span style="color:var(--muted);font-size:11px">Size: ${(blob.size / 1024).toFixed(1)} KB</span>`;
+    });
+  } else {
+    r.text().then(t => { bodyEl.innerHTML = `<span style="color:var(--red)">${escHtml(t)}</span>`; });
+  }
+}
+
+function showStreamResponse(r, t0, statusEl, metaEl, bodyEl) {
+  statusEl.textContent = `${r.status} ${r.statusText}`;
+  statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
+  metaEl.textContent = "streaming…";
+  bodyEl.innerHTML = "";
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+
+  function read() {
+    return reader.read().then(({ done, value }) => {
+      if (done) {
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+        metaEl.textContent = `${elapsed}s  |  text/event-stream`;
+        document.getElementById("sendBtn").disabled = false;
+        document.getElementById("sendBtn").textContent = "Send";
+        return;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          if (data === "[DONE]") break;
+          try {
+            const obj = JSON.parse(data);
+            const delta = obj.choices?.[0]?.delta?.content || "";
+            if (delta) {
+              content += delta;
+              bodyEl.innerHTML = escHtml(content);
+              bodyEl.scrollTop = bodyEl.scrollHeight;
+            }
+          } catch {}
+        }
+      }
+      return read();
+    });
+  }
+  read();
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+function escHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function syntaxHighlight(json) {
+  json = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, m => {
+    let color = "#fbbf24"; // number
+    if (/^"/.test(m)) {
+      color = m.endsWith(":") ? "#6c8cff" : "#34d399"; // key or string
+    } else if (/true|false/.test(m)) {
+      color = "#a78bfa";
+    } else if (/null/.test(m)) {
+      color = "#f87171";
+    }
+    return `<span style="color:${color}">${m}</span>`;
+  });
+}
+
+// ── Periodic health check ─────────────────────────────────────────────
+async function healthCheck() {
+  const base = document.getElementById("baseUrl").value.replace(/\/+$/, "");
+  const dot = document.getElementById("statusDot");
+  try {
+    const r = await fetch(`${base}/status`, { signal: AbortSignal.timeout(3000) });
+    dot.className = r.ok ? "status-dot online" : "status-dot offline";
+    dot.title = r.ok ? "Online" : `Status ${r.status}`;
+  } catch {
+    dot.className = "status-dot offline";
+    dot.title = "Offline";
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────
+buildSidebar();
+fetchModels();
+healthCheck();
+setInterval(healthCheck, 5000);
+
+// Refresh models when URL changes
+document.getElementById("baseUrl").addEventListener("change", () => { fetchModels(); healthCheck(); });
+</script>
+</body>
+</html>
