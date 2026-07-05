@@ -14,7 +14,7 @@ except ImportError:
     import requests
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
-AUDIO_FILE = Path("~/roundtable_en.wav").expanduser()
+AUDIO_FILE = Path("~/models/funny.wav").expanduser()
 
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -209,7 +209,7 @@ except Exception as e:
 header("8. POST /v1/audio/speech  —  CrispASR TTS (GPU)")
 try:
     payload = {
-        "model": "qwen-talker-1.7b-voicedesign",
+        "model": "qwen-talker-1.7b-customvoice",
         "input": "Hello, this is a test of the text-to-speech system.",
     }
     r = requests.post(f"{BASE}/v1/audio/speech", json=payload, timeout=60)
@@ -244,8 +244,8 @@ except Exception as e:
 header("10. POST /v1/audio/speech-to-speech  —  CrispASR S2S")
 try:
     with open(AUDIO_FILE, "rb") as f:
-        files = {"file": ("roundtable_en.wav", f, "audio/wav")}
-        data = {"model": "qwen-talker-1.7b-voicedesign"}
+        files = {"file": ("funny.wav", f, "audio/wav")}
+        data = {"model": "qwen-talker-1.7b-customvoice"}
         r = requests.post(f"{BASE}/v1/audio/speech-to-speech",
                           files=files, data=data, timeout=60)
     run("Returns 2xx", 200 <= r.status_code < 300,
@@ -269,7 +269,8 @@ try:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
     payload = {
         "model": "qwen3-asr-1.7b",
-        "target_lang": "en",
+        "source_lang": "en",
+        "target_lang": "ja",
         "input": audio_b64,
     }
     r = requests.post(f"{BASE}/v1/translate", json=payload, timeout=60)

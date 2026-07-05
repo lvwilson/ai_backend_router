@@ -162,34 +162,34 @@ class Orchestrator:
         """
         VRAM available for a new backend.
 
-        Uses per-process accounting: total_vram - reserve - sum(per-process VRAM
-        of our managed backends). This is authoritative because it reads exactly
-        what each managed process holds, ignoring unmanaged GPU consumers
-        (Xorg, Steam, etc.).
+        Uses nvidia-smi's actual free VRAM (total - used) minus our reserve.
+        This accounts for all GPU consumers (Xorg, Steam, etc.), not just
+        our managed backends.
 
-        Falls back to nvidia-smi total reading if per-process data is unavailable.
+        Falls back to per-process accounting if nvidia-smi is unavailable.
         """
-        # Try per-process accounting first.
+        # Primary: use nvidia-smi's actual free VRAM.
+        used = await query_vram_used_gb()
+        if used is not None:
+            return self.total_vram_gb - self.vram_reserve_gb - used
+
+        # Fallback: per-process accounting of our managed backends.
         per_pid = await query_per_process_vram()
         if per_pid:
-            # Sum VRAM of our managed backends by PID.
             our_vram = 0.0
             for loader in self._running():
                 pid = loader.pid
                 if pid is not None:
                     our_vram += per_pid.get(pid, 0.0)
                 else:
-                    # Fallback for backends without PID (shouldn't happen for alive processes)
                     our_vram += self._tracked_vram(loader)
-            # Add extra VRAM (ComfyUI model VRAM).
             our_vram += sum(self._extra_vram.values())
             return self.total_vram_gb - self.vram_reserve_gb - our_vram
 
-        # Fallback: total nvidia-smi reading minus reserve.
-        used = await query_vram_used_gb()
-        if used is None:
-            used = sum(self._tracked_vram(s) for s in self._running())
-        return self.total_vram_gb - self.vram_reserve_gb - used
+        # Last resort: tracked bookkeeping.
+        return self.total_vram_gb - self.vram_reserve_gb - sum(
+            self._tracked_vram(s) for s in self._running()
+        )
 
     # ── Core workflow ────────────────────────────────────────────────────
 
@@ -234,7 +234,7 @@ class Orchestrator:
             if needed > 0:
                 await self._make_room(needed, exclude=name, cpu=is_cpu)
 
-            # Launch with retries.
+            # Launch with retries, re-checking VRAM pressure after each failure.
             attempts = 1 + max(0, loader.config.retries)
             started = False
             for attempt in range(1, attempts + 1):
@@ -242,6 +242,11 @@ class Orchestrator:
                     started = True
                     break
                 logger.warning("[%s] Launch attempt %d/%d failed", name, attempt, attempts)
+                # Re-evaluate VRAM pressure — a failed launch may mean the
+                # available budget was optimistic (e.g. unmanaged GPU consumers
+                # like Xorg). Try evicting more before retrying.
+                if attempt < attempts and not is_cpu:
+                    await self._make_room(needed, exclude=name, cpu=False)
 
             if not started:
                 raise RuntimeError(f"Backend '{name}' failed to start after {attempts} attempt(s)")
