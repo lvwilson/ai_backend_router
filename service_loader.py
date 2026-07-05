@@ -215,6 +215,7 @@ class ServiceConfig:
 
     # Slot cache (llama.cpp prompt cache)
     slot_save_path: str | None = None            # Directory for llama-server slot persistence cache
+    is_multimodal: bool = False                   # True if backend uses --mmproj (slot cache unsupported)
 
 
 # ── ServiceLoader ──────────────────────────────────────────────────────────
@@ -524,11 +525,14 @@ class ServiceLoader:
         Save the slot prompt cache via llama-server API.
 
         Only meaningful for llama.cpp backends that have `slot_save_path`
-        configured. Uses the backend name as the cache filename so each
-        backend gets its own cache file.
+        configured and are not multimodal (llama-server returns 501 for
+        slot cache operations on multimodal models). Uses the backend name
+        as the cache filename so each backend gets its own cache file.
         """
         if not self.config.slot_save_path:
             return
+        if self.config.is_multimodal:
+            return  # Slot cache not supported by multimodal models
         if self._state != ServiceState.RUNNING:
             return
         filename = f"{self.config.name}.bin"
@@ -542,6 +546,9 @@ class ServiceLoader:
                 ) as resp:
                     if resp.status == 200:
                         logger.info("[%s] Slot cache saved as '%s'", self.config.name, filename)
+                    elif resp.status in (404, 501):
+                        # 501 = not supported by this model type, 404 = no slot/cache
+                        logger.debug("[%s] Slot cache save returned %d", self.config.name, resp.status)
                     else:
                         logger.warning(
                             "[%s] Slot cache save returned %d", self.config.name, resp.status
@@ -554,10 +561,14 @@ class ServiceLoader:
         Restore the slot prompt cache via llama-server API.
 
         Only meaningful for llama.cpp backends that have `slot_save_path`
-        configured. Uses the backend name as the cache filename.
+        configured and are not multimodal (llama-server returns 501 for
+        slot cache operations on multimodal models). Uses the backend name
+        as the cache filename.
         """
         if not self.config.slot_save_path:
             return
+        if self.config.is_multimodal:
+            return  # Slot cache not supported by multimodal models
         if self._state != ServiceState.RUNNING:
             return
         filename = f"{self.config.name}.bin"
@@ -571,6 +582,9 @@ class ServiceLoader:
                 ) as resp:
                     if resp.status == 200:
                         logger.info("[%s] Slot cache restored from '%s'", self.config.name, filename)
+                    elif resp.status in (404, 501):
+                        # 501 = not supported by this model type, 404 = no cache file
+                        logger.debug("[%s] Slot cache restore returned %d", self.config.name, resp.status)
                     else:
                         logger.warning(
                             "[%s] Slot cache restore returned %d", self.config.name, resp.status
