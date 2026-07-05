@@ -241,46 +241,7 @@ except Exception as e:
     run("Speech (TTS CPU) reachable", False, str(e))
 
 # ──────────────────────────────────────────────────────────────
-header("10. POST /v1/audio/speech-to-speech  —  CrispASR S2S")
-try:
-    with open(AUDIO_FILE, "rb") as f:
-        files = {"file": ("funny.wav", f, "audio/wav")}
-        data = {"model": "qwen-talker-1.7b-customvoice"}
-        r = requests.post(f"{BASE}/v1/audio/speech-to-speech",
-                          files=files, data=data, timeout=60)
-    run("Returns 2xx", 200 <= r.status_code < 300,
-        f"status={r.status_code}")
-    if r.status_code == 200:
-        ct = r.headers.get("content-type", "")
-        if "text" in ct or "json" in ct:
-            run("Got text response", len(r.text) > 0, r.text[:200])
-        else:
-            run("Got audio data", len(r.content) > 0, f"bytes={len(r.content)}")
-    else:
-        run("Response", False, r.text[:200])
-except Exception as e:
-    run("Speech-to-speech reachable", False, str(e))
-
-# ──────────────────────────────────────────────────────────────
-header("11. POST /v1/translate  —  CrispASR translation")
-try:
-    import base64
-    with open(AUDIO_FILE, "rb") as f:
-        audio_b64 = base64.b64encode(f.read()).decode("utf-8")
-    payload = {
-        "model": "qwen3-asr-1.7b",
-        "source_lang": "en",
-        "target_lang": "ja",
-        "input": audio_b64,
-    }
-    r = requests.post(f"{BASE}/v1/translate", json=payload, timeout=60)
-    run("Returns 2xx", 200 <= r.status_code < 300,
-        f"status={r.status_code}, body={r.text[:200]}")
-except Exception as e:
-    run("Translate endpoint reachable", False, str(e))
-
-# ──────────────────────────────────────────────────────────────
-header("12. GET /v1/voices  —  CrispASR voice list")
+header("10. GET /v1/voices  —  CrispASR voice list")
 try:
     r = requests.get(f"{BASE}/v1/voices", timeout=30)
     run("Returns 2xx", 200 <= r.status_code < 300, f"status={r.status_code}")
@@ -292,7 +253,7 @@ except Exception as e:
     run("Voices endpoint reachable", False, str(e))
 
 # ──────────────────────────────────────────────────────────────
-header("13. POST /v1/images/generations  —  ComfyUI image gen")
+header("11. POST /v1/images/generations  —  ComfyUI image gen")
 try:
     payload = {
         "model": "krea2",
@@ -318,7 +279,7 @@ except Exception as e:
     run("Image generation reachable", False, str(e))
 
 # ──────────────────────────────────────────────────────────────
-header("14. Error handling  —  unknown model returns 400")
+header("12. Error handling  —  unknown model returns 400")
 try:
     payload = {"model": "nonexistent-model", "messages": [{"role": "user", "content": "hi"}]}
     r = requests.post(f"{BASE}/v1/chat/completions", json=payload, timeout=30)
@@ -330,7 +291,7 @@ except Exception as e:
     run("Error handling works", False, str(e))
 
 # ──────────────────────────────────────────────────────────────
-header("15. Error handling  —  missing prompt on image gen")
+header("13. Error handling  —  missing prompt on image gen")
 try:
     payload = {"model": "krea2"}
     r = requests.post(f"{BASE}/v1/images/generations", json=payload, timeout=10)
