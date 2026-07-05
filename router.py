@@ -57,6 +57,7 @@ def create_app(config: RouterConfig) -> FastAPI:
         total_vram_gb=config.total_vram_gb,
         vram_reserve_gb=config.vram_reserve_gb,
         sysram_reserve_gb=config.sysram_reserve_gb,
+        cache_dir=config.cache_dir,
     )
 
     @asynccontextmanager

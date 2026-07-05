@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -85,11 +86,16 @@ class Orchestrator:
         total_vram_gb: float,
         vram_reserve_gb: float = 2.0,
         sysram_reserve_gb: float = 2.0,
+        cache_dir: str | None = None,
         event_callback: EventCallback | None = None,
     ):
         self.total_vram_gb = total_vram_gb
         self.vram_reserve_gb = vram_reserve_gb
         self.sysram_reserve_gb = sysram_reserve_gb
+        self.cache_dir = cache_dir
+        # Ensure cache directory exists
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
         self.services: dict[str, ServiceLoader] = {
             c.name: ServiceLoader(c, event_callback=event_callback) for c in configs
         }
@@ -190,6 +196,7 @@ class Orchestrator:
                         await self._make_room(increase, exclude=name, cpu=is_cpu)
                     return loader
                 logger.warning("[%s] Health check failed — killing and relaunching", name)
+                await loader.save_slot_cache()
                 await loader.kill()
 
             # Make room if needed.
@@ -203,12 +210,19 @@ class Orchestrator:
 
             # Launch with retries.
             attempts = 1 + max(0, loader.config.retries)
+            started = False
             for attempt in range(1, attempts + 1):
                 if await loader.start():
-                    return loader
+                    started = True
+                    break
                 logger.warning("[%s] Launch attempt %d/%d failed", name, attempt, attempts)
 
-            raise RuntimeError(f"Backend '{name}' failed to start after {attempts} attempt(s)")
+            if not started:
+                raise RuntimeError(f"Backend '{name}' failed to start after {attempts} attempt(s)")
+
+            # Restore slot cache after successful launch (llama.cpp only).
+            await loader.restore_slot_cache()
+            return loader
 
     async def _make_room(self, needed_gb: float, exclude: str, cpu: bool = False) -> None:
         """
@@ -266,6 +280,7 @@ class Orchestrator:
                 "%s pressure: evicting '%s' (~%.1f GB) — need %.1f GB, have %.1f GB",
                 label, victim.config.name, freed, needed_gb, available,
             )
+            await victim.save_slot_cache()
             await victim.stop()
             self._extra_vram.pop(victim.config.name, None)
 
@@ -322,4 +337,6 @@ class Orchestrator:
         running = self._running()
         if running:
             logger.info("Shutting down %d running backend(s)", len(running))
+            # Save slot caches before stopping llama backends
+            await asyncio.gather(*(s.save_slot_cache() for s in running))
             await asyncio.gather(*(s.stop() for s in running))
