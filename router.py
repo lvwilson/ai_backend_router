@@ -30,6 +30,7 @@ from pathlib import Path
 
 import aiohttp
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from comfyui import (
@@ -70,6 +71,12 @@ def create_app(config: RouterConfig) -> FastAPI:
         await orch.shutdown()
 
     app = FastAPI(title="Smart LLM Router", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.state.orch = orch
     app.state.config = config
 
