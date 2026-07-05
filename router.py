@@ -154,7 +154,7 @@ def create_app(config: RouterConfig) -> FastAPI:
             model = json.loads(body).get("model")
             if model:
                 return body, model
-        except (json.JSONDecodeError, AttributeError):
+        except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
             pass
         # Try multipart form-data: name="model" followed by value on next line
         try:
