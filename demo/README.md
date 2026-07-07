@@ -36,12 +36,26 @@ meaningless output.
 ## Usage
 
 ```bash
-# With defaults (lo-fi chill piano, 30s tracks):
+# With defaults (lo-fi chill piano, 2-min tracks):
 python demo/iterative_music.py
 
-# Custom router URL and tags:
-python demo/iterative_music.py http://127.0.0.1:8000 "jazz, upbeat, brass"
+# Custom router URL and concept:
+python demo/iterative_music.py http://127.0.0.1:8000 "a relaxing evening song"
+
+# With a reference MP3 — gemma analyzes it for initial tags and concept:
+python demo/iterative_music.py http://127.0.0.1:8000 "inspired by this track" path/to/reference.mp3
 ```
+
+### Reference MP3 Input
+
+When a third argument (MP3 file path) is provided, gemma listens to the
+reference track before any generation occurs and produces:
+
+- **Suggested tags** — 5–8 style descriptors extracted from the reference.
+- **Concept paragraph** — A description of the track's vibe and character.
+
+These are used to seed the initial song design, giving the agentic loop a
+musical starting point rather than a purely textual one.
 
 ## Requirements
 

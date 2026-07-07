@@ -11,11 +11,17 @@ Pipeline:
   6. Pick the best track based on gemma's scoring.
 
 Usage:
-  python demo/iterative_music.py [BASE_URL] [CONCEPT]
+  python demo/iterative_music.py [BASE_URL] [CONCEPT] [INPUT_MP3]
 
 Defaults:
   BASE_URL     = http://127.0.0.1:8000
   CONCEPT      = "a relaxing evening song"  (gemma expands this)
+  INPUT_MP3    = None  (if given, gemma analyzes it for initial tags/concept)
+
+When INPUT_MP3 is provided:
+  Gemma listens to the reference track and produces suggested tags and a
+  one-paragraph concept. These are used as the starting point for the
+  agentic loop instead of the text CONCEPT alone.
 
 Gemma command format (3 backticks):
 ```
@@ -48,6 +54,7 @@ except ImportError:
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
 CONCEPT = sys.argv[2] if len(sys.argv) > 2 else "a relaxing evening song"
+INPUT_MP3 = Path(sys.argv[3]).expanduser() if len(sys.argv) > 3 else None
 DURATION = 120          # 2-minute songs
 BPM = None              # Let gemma decide
 SEED = 0               # 0 = randomize each generation
@@ -198,6 +205,28 @@ def generate_music(tags: str, lyrics: str, bpm: int, iteration: int) -> Path | N
 
 # ── System prompts for gemma ─────────────────────────────────────────────
 
+ANALYSIS_PROMPT = """You are a creative music director analyzing a reference track.
+
+Listen to the audio carefully and produce two things:
+
+1. TAGS — A concise, comma-separated list of 5–8 style descriptors
+   (genre, mood, instrumentation, production style). Under 120 characters.
+   These tags will be used to drive an AI music generation model.
+
+2. CONCEPT — A single paragraph (3–5 sentences) describing the overall
+   vibe, mood, and character of the track. This concept will guide the
+   creative direction for new music generation inspired by this reference.
+
+Wrap your response in exactly 3 backticks (```):
+
+```
+tags: <5-8 concise comma-separated style descriptors>
+concept: <a single paragraph describing the track's vibe and character>
+```
+
+Be specific and evocative. Focus on what makes this track distinctive."""
+
+
 CONCEPT_PROMPT = """You are a creative music director. Given a brief concept, you will
 design the initial parameters for an AI music generation model.
 
@@ -301,7 +330,7 @@ def gemma_request(messages: list, max_tokens: int = 8000) -> str | None:
     return text
 
 
-KNOWN_KEYS = {"score", "tags", "lyrics", "bpm", "feedback"}
+KNOWN_KEYS = {"score", "tags", "lyrics", "bpm", "feedback", "concept"}
 
 
 def parse_command_block(text: str) -> dict | None:
@@ -309,8 +338,9 @@ def parse_command_block(text: str) -> dict | None:
     Extract a structured command block delimited by triple backticks.
 
     Supports multi-line values: if a line does NOT start with a known
-    key (score/tags/lyrics/bpm/feedback), it is appended to the previous
-    key's value. This is essential for multi-line lyrics.
+    key (score/tags/lyrics/bpm/feedback/concept), it is appended to the
+    previous key's value. This is essential for multi-line lyrics and
+    concept paragraphs.
 
     Expected format:
     score: 7
@@ -361,7 +391,42 @@ def parse_command_block(text: str) -> dict | None:
         if current_key is not None and current_key in result:
             result[current_key] += "\n" + line
 
-    return result if "score" in result else None
+    return result if "score" in result or "tags" in result else None
+
+
+def gemma_analyze_mp3(mp3_path: Path) -> dict | None:
+    """
+    Send an MP3 to gemma for analysis. Returns a dict with 'tags' and
+    'concept' keys that can seed the initial song parameters.
+    """
+    audio_bytes = mp3_path.read_bytes()
+    audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": ANALYSIS_PROMPT},
+                {"type": "image_url", "image_url": {"url": audio_b64}},
+            ],
+        }
+    ]
+
+    text = gemma_request(messages, max_tokens=2048)
+    if not text:
+        return None
+
+    parsed = parse_command_block(text)
+    if parsed and parsed.get("tags"):
+        ok(f"Reference analysis — tags: {parsed['tags']}")
+        if parsed.get("concept"):
+            info("Concept:")
+            for lline in parsed["concept"].split("\n"):
+                info(f"  {lline}")
+        return parsed
+    else:
+        info(f"Raw gemma response: {text[:200]}")
+        return None
 
 
 def gemma_concept(concept: str) -> dict | None:
@@ -534,6 +599,14 @@ def restart_router() -> bool:
 def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
 
+    # Validate input MP3 if provided
+    if INPUT_MP3 is not None:
+        if not INPUT_MP3.exists():
+            fail(f"Input MP3 not found: {INPUT_MP3}")
+            sys.exit(1)
+        size_kb = INPUT_MP3.stat().st_size / 1024
+        info(f"Reference track: {INPUT_MP3.name} ({size_kb:.1f} KB)")
+
     # Restart the router for clean state
     step("Restarting router")
     if not restart_router():
@@ -547,15 +620,36 @@ def main():
     print(f"  Music:    {MUSIC_MODEL}")
     print(f"  Critic:   {GEMMA_MODEL}")
     print(f"  Concept:  {CONCEPT}")
+    if INPUT_MP3:
+        print(f"  Reference: {INPUT_MP3}")
     print(f"  Duration: {DURATION}s, Max iterations: {MAX_ITERATIONS}")
     print(f"  Timeout:  {GEN_TIMEOUT}s")
     print(f"{BOLD}{'=' * 60}{RESET}")
 
+    # ── Phase 0: Analyze reference MP3 if provided ─────────────────────
+    effective_concept = CONCEPT
+    reference_tags = None
+
+    if INPUT_MP3:
+        step("Phase 0: Analyzing reference track")
+        analysis = gemma_analyze_mp3(INPUT_MP3)
+        if analysis:
+            if analysis.get("concept"):
+                effective_concept = analysis["concept"]
+                # Prepend the original concept for context
+                effective_concept = f"{CONCEPT}. Reference track analysis: {effective_concept}"
+                ok("Using analysis-derived concept for generation.")
+            reference_tags = analysis.get("tags")
+            if reference_tags:
+                ok(f"Reference tags captured: {reference_tags}")
+        else:
+            fail("Analysis failed, falling back to text concept.")
+
     # ── Phase 1: Gemma designs the concept ─────────────────────────────
     step("Phase 1: Gemma designs the song concept")
-    info(f"Concept prompt: \"{CONCEPT}\"")
+    info(f"Concept prompt: \"{effective_concept}\"")
 
-    concept = gemma_concept(CONCEPT)
+    concept = gemma_concept(effective_concept)
     if not concept:
         fail("Gemma failed to design a concept.")
         sys.exit(1)
@@ -565,6 +659,11 @@ def main():
     bpm = concept.get("bpm", 90)
     if lyrics and lyrics.lower() in ("instrumental", "empty", ""):
         lyrics = ""
+
+    # Prefer reference analysis tags over gemma's generated tags
+    if reference_tags:
+        info(f"Overriding tags with reference analysis: {reference_tags}")
+        tags = reference_tags
 
     print(f"\n  {BOLD}Initial design:{RESET}")
     print(f"  {BOLD}Tags:{RESET} {tags}")
