@@ -56,5 +56,5 @@ backends:
     retries: 1
     models:
       krea2:
-        workflow: ~/projectnotes/untracked/Krea2 Basic.json
+        workflow: ~/projectnotes/workflows/krea2_basic.json
         vram_usage: 14    # GB for the krea2 turbo checkpoint + VAE + CLIP
