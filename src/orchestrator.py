@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from service_loader import (
+from .service_loader import (
     EventCallback,
     ServiceConfig,
     ServiceLoader,

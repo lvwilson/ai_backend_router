@@ -25,7 +25,7 @@ from typing import Any
 
 import yaml
 
-from service_loader import ServiceConfig
+from .service_loader import ServiceConfig
 
 
 def _p(path: Any) -> str:

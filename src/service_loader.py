@@ -38,7 +38,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine
 
-from health_checker import HealthChecker
+from .health_checker import HealthChecker
 
 EventCallback = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 
