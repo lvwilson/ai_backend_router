@@ -193,7 +193,7 @@ const ENDPOINTS = [
         id: "image", method: "POST", path: "/v1/images/generations",
         desc: "Generate images via ComfyUI",
         fields: [
-          { name: "model", type: "select", label: "Model", options: "image", default: "krea2" },
+          { name: "model", type: "select", label: "Image Model", options: "image", default: "krea2" },
           { name: "prompt", type: "textarea", label: "Prompt", default: "A serene mountain lake at sunrise, photorealistic, golden hour lighting" },
           { name: "negative_prompt", type: "text", label: "Negative Prompt", default: "blurry, low quality, distorted" },
           { name: "size", type: "text", label: "Size", default: "512x512" },
@@ -201,6 +201,23 @@ const ENDPOINTS = [
           { name: "steps", type: "number", label: "Steps (optional)", default: "" },
           { name: "cfg", type: "number", label: "CFG Scale (optional)", default: "" },
           { name: "seed", type: "number", label: "Seed (optional, -1=random)", default: "" },
+        ]
+      },
+    ]
+  },
+  {
+    section: "Music Generation",
+    items: [
+      {
+        id: "music", method: "POST", path: "/v1/music/generations",
+        desc: "Generate music via ComfyUI (Ace Step workflow)",
+        fields: [
+          { name: "model", type: "select", label: "Music Model", options: "music", default: "ace_step_1.5_xl_turbo" },
+          { name: "tags", type: "text", label: "Tags / Style", default: "lo-fi, chill, ambient" },
+          { name: "lyrics", type: "textarea", label: "Lyrics (optional)", default: "" },
+          { name: "duration", type: "number", label: "Duration (seconds)", default: 30 },
+          { name: "bpm", type: "number", label: "BPM", default: 120 },
+          { name: "seed", type: "number", label: "Seed (0=random)", default: 0 },
         ]
       },
     ]
@@ -223,13 +240,20 @@ const ENDPOINTS = [
           { name: "model", type: "select", label: "Model", options: "image", default: "krea2" },
         ]
       },
+      {
+        id: "err-music", method: "POST", path: "/v1/music/generations",
+        desc: "Test: missing tags/lyrics → 400",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "music", default: "ace_step_1.5_xl_turbo" },
+        ]
+      },
     ]
   },
 ];
 
 // ── State ─────────────────────────────────────────────────────────────
 let activeEndpoint = null;
-let modelCache = { llama: [], stt: [], tts: [], image: [] };
+let modelCache = { llama: [], stt: [], tts: [], image: [], music: [] };
 
 // ── Build sidebar ─────────────────────────────────────────────────────
 function buildSidebar() {
@@ -321,13 +345,17 @@ async function fetchModels() {
     modelCache.stt = [];
     modelCache.tts = [];
     modelCache.image = [];
+    modelCache.music = [];
     for (const m of data.data) {
       if (m.owned_by === "llama") modelCache.llama.push(m.id);
       else if (m.owned_by === "crispasr") {
         if (m.id.includes("asr") || m.id.includes("transcription")) modelCache.stt.push(m.id);
         else modelCache.tts.push(m.id);
       }
-      else if (m.owned_by === "comfyui") modelCache.image.push(m.id);
+      else if (m.owned_by === "comfyui") {
+        if (m.type === "music") modelCache.music.push(m.id);
+        else modelCache.image.push(m.id);
+      }
     }
     // Also add crispasr to stt+tts combined
     modelCache.stt = modelCache.stt.length ? modelCache.stt : data.data.filter(m => m.owned_by === "crispasr").map(m => m.id);
@@ -385,6 +413,16 @@ async function sendRequest() {
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
       // TTS returns audio blob
       showAudioResponse(r, elapsed, respStatus, respMeta, respBody);
+    } else if (ep.id === "music") {
+      // Music generation — JSON POST, returns JSON with file paths
+      const body = buildBody(ep);
+      const r = await fetch(`${base}${ep.path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showMusicResponse(r, elapsed, respStatus, respMeta, respBody, base);
     } else {
       // JSON POST — build body from fields
       const body = buildBody(ep);
@@ -471,6 +509,33 @@ function showAudioResponse(r, elapsed, statusEl, metaEl, bodyEl) {
     r.blob().then(blob => {
       const url = URL.createObjectURL(blob);
       bodyEl.innerHTML = `<audio controls autoplay src="${url}"></audio><br><span style="color:var(--muted);font-size:11px">Size: ${(blob.size / 1024).toFixed(1)} KB</span>`;
+    });
+  } else {
+    r.text().then(t => { bodyEl.innerHTML = `<span style="color:var(--red)">${escHtml(t)}</span>`; });
+  }
+}
+
+function showMusicResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
+  statusEl.textContent = `${r.status} ${r.statusText}`;
+  statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
+  metaEl.textContent = `${elapsed}s  |  ${r.headers.get("content-type") || "unknown"}`;
+  if (r.ok) {
+    r.json().then(d => {
+      if (Array.isArray(d.data) && d.data.length > 0) {
+        let audioHtml = "";
+        for (const item of d.data) {
+          const path = item.path || item.url || "";
+          if (path) {
+            // Try serving via the router's static file proxy, fall back to file://
+            const proxyUrl = `${base}/static/${encodeURIComponent(path)}`;
+            const fileUrl = "file://" + path;
+            audioHtml += `<div style="margin-top:12px;"><audio controls src="${proxyUrl}" onerror="this.src='${fileUrl}'" style="width:100%;"></audio><br><span style="font-size:11px;color:var(--muted);">${escHtml(path)}</span></div>`;
+          }
+        }
+        bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} audio file(s) generated</div>${audioHtml}<details style="margin-top:12px;"><summary style="cursor:pointer;font-size:12px;color:var(--muted);">Show raw JSON</summary><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;">${syntaxHighlight(JSON.stringify(d, null, 2))}</pre></details>`;
+      } else {
+        bodyEl.innerHTML = syntaxHighlight(JSON.stringify(d, null, 2));
+      }
     });
   } else {
     r.text().then(t => { bodyEl.innerHTML = `<span style="color:var(--red)">${escHtml(t)}</span>`; });
