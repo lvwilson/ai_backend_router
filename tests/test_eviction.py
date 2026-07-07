@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-test_eviction.py — TDD tests for the VRAM eviction zombie-process bug.
+test_eviction.py — Tests for the VRAM eviction zombie-process bug and
+orchestrator lifecycle management.
 
 Bug: When _force_kill() times out after SIGKILL, the process state is set
 to DEAD but the OS process is still running and holding VRAM. The next
@@ -15,15 +16,17 @@ Fixes applied:
   5. VRAM accounting uses per-process nvidia-smi readings (authoritative)
 
 Tests use `python3 -m http.server` as the backend so health checks pass.
+
+Run: pytest tests/test_eviction.py -v
 """
 import asyncio
 import os
 import signal
 import socket
 import sys
-import time
-import unittest
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -58,7 +61,9 @@ def _http_server_config(name: str, port: int | None = None) -> ServiceConfig:
     )
 
 
-class TestZombieProcessCleanup(unittest.IsolatedAsyncioTestCase):
+# ── Zombie Process Cleanup ────────────────────────────────────────────────
+
+class TestZombieProcessCleanup:
     """Test that zombie processes are cleaned up before new launches."""
 
     async def test_start_kills_stale_process(self):
@@ -71,9 +76,9 @@ class TestZombieProcessCleanup(unittest.IsolatedAsyncioTestCase):
 
         # First launch — should succeed
         ok = await loader.start()
-        self.assertTrue(ok, "First start should succeed")
+        assert ok, "First start should succeed"
         pid_before = loader.pid
-        self.assertIsNotNone(pid_before)
+        assert pid_before is not None
 
         # Verify process alive in OS
         os.kill(pid_before, 0)  # raises if dead
@@ -84,15 +89,15 @@ class TestZombieProcessCleanup(unittest.IsolatedAsyncioTestCase):
         # Second launch — should kill stale process first
         loader._state = ServiceState.IDLE
         ok2 = await loader.start()
-        self.assertTrue(ok2, "Second start should succeed after killing stale")
+        assert ok2, "Second start should succeed after killing stale"
         pid_after = loader.pid
-        self.assertIsNotNone(pid_after)
+        assert pid_after is not None
 
         # Old process should be dead
-        with self.assertRaises(ProcessLookupError):
+        with pytest.raises(ProcessLookupError):
             os.kill(pid_before, 0)
 
-        self.assertNotEqual(pid_before, pid_after, "Should have a new PID")
+        assert pid_before != pid_after, "Should have a new PID"
 
         await loader.stop()
 
@@ -105,7 +110,7 @@ class TestZombieProcessCleanup(unittest.IsolatedAsyncioTestCase):
         loader = ServiceLoader(config)
 
         ok = await loader.start()
-        self.assertTrue(ok)
+        assert ok
         pid = loader.pid
 
         # Simulate measured VRAM (per-process accounting stores in actual_vram_gb)
@@ -121,11 +126,11 @@ class TestZombieProcessCleanup(unittest.IsolatedAsyncioTestCase):
         await loader._force_kill()
 
         # State should be DEAD
-        self.assertEqual(loader._state, ServiceState.DEAD)
+        assert loader._state == ServiceState.DEAD
 
         # VRAM tracking must be reset despite zombie
-        self.assertIsNone(loader._actual_vram_gb,
-                          "VRAM tracking should be reset on force-kill timeout")
+        assert loader._actual_vram_gb is None, \
+            "VRAM tracking should be reset on force-kill timeout"
 
         # OS process is still alive (mock never resolved)
         os.kill(pid, 0)
@@ -142,18 +147,20 @@ class TestZombieProcessCleanup(unittest.IsolatedAsyncioTestCase):
         loader = ServiceLoader(config)
 
         ok = await loader.start()
-        self.assertTrue(ok)
+        assert ok
 
         # Simulate measured VRAM
         loader._actual_vram_gb = 5.5
 
         await loader.stop()
 
-        self.assertIsNone(loader._actual_vram_gb,
-                          "actual_vram_gb should be None after stop")
+        assert loader._actual_vram_gb is None, \
+            "actual_vram_gb should be None after stop"
 
 
-class TestEvictionVRAMConfirmation(unittest.IsolatedAsyncioTestCase):
+# ── Eviction VRAM Confirmation ────────────────────────────────────────────
+
+class TestEvictionVRAMConfirmation:
     """Test that eviction actually confirms VRAM is freed."""
 
     async def test_eviction_confirms_vram_freed(self):
@@ -162,7 +169,7 @@ class TestEvictionVRAMConfirmation(unittest.IsolatedAsyncioTestCase):
         """
         vram = await query_vram_used_gb()
         if vram is None:
-            self.skipTest("nvidia-smi not available")
+            pytest.skip("nvidia-smi not available")
 
         vram_before = vram
 
@@ -171,18 +178,15 @@ class TestEvictionVRAMConfirmation(unittest.IsolatedAsyncioTestCase):
         loader = orch.services["evict-vram"]
 
         ok = await loader.start()
-        self.assertTrue(ok)
+        assert ok
 
         await loader.stop()
         await asyncio.sleep(1)
 
         vram_after = await query_vram_used_gb()
 
-        self.assertLessEqual(
-            vram_after,
-            vram_before + 0.5,
-            f"VRAM leaked after stop: before={vram_before:.2f}, after={vram_after:.2f}",
-        )
+        assert vram_after <= vram_before + 0.5, \
+            f"VRAM leaked after stop: before={vram_before:.2f}, after={vram_after:.2f}"
 
         await orch.shutdown()
 
@@ -197,7 +201,7 @@ class TestEvictionVRAMConfirmation(unittest.IsolatedAsyncioTestCase):
         # First launch
         loader = await orch.ensure_running("evict-relaunch")
         pid1 = loader.pid
-        self.assertIsNotNone(pid1)
+        assert pid1 is not None
 
         # Stop it
         await loader.stop()
@@ -205,12 +209,14 @@ class TestEvictionVRAMConfirmation(unittest.IsolatedAsyncioTestCase):
         # Second launch via ensure_running
         loader2 = await orch.ensure_running("evict-relaunch")
         pid2 = loader2.pid
-        self.assertIsNotNone(pid2)
+        assert pid2 is not None
 
         await orch.shutdown()
 
 
-class TestOrchestratorLocking(unittest.IsolatedAsyncioTestCase):
+# ── Orchestrator Locking ──────────────────────────────────────────────────
+
+class TestOrchestratorLocking:
     """Test that concurrent ensure_running calls are properly serialized."""
 
     async def test_concurrent_ensure_running_is_serialized(self):
@@ -228,12 +234,14 @@ class TestOrchestratorLocking(unittest.IsolatedAsyncioTestCase):
         )
 
         # All should return the same loader
-        self.assertTrue(all(r is results[0] for r in results))
+        assert all(r is results[0] for r in results)
 
         await orch.shutdown()
 
 
-class TestVRAMAccounting(unittest.IsolatedAsyncioTestCase):
+# ── VRAM Accounting ───────────────────────────────────────────────────────
+
+class TestVRAMAccounting:
     """Test that VRAM accounting is correct after lifecycle changes."""
 
     async def test_vram_reset_after_stop_allows_fresh_measurement(self):
@@ -246,23 +254,23 @@ class TestVRAMAccounting(unittest.IsolatedAsyncioTestCase):
 
         # First cycle
         ok1 = await loader.start()
-        self.assertTrue(ok1)
+        assert ok1
         vram_after_first = loader._actual_vram_gb
 
         await loader.stop()
 
         # VRAM tracking should be reset
-        self.assertIsNone(loader._actual_vram_gb)
+        assert loader._actual_vram_gb is None
 
         # Second cycle — should get fresh measurement
         ok2 = await loader.start()
-        self.assertTrue(ok2)
+        assert ok2
         vram_after_second = loader._actual_vram_gb
 
         # http.server doesn't use GPU, so actual_vram_gb may be None.
         # But if it is set, it should be non-negative.
         if vram_after_second is not None:
-            self.assertGreaterEqual(vram_after_second, 0)
+            assert vram_after_second >= 0
 
         await loader.stop()
 
@@ -275,14 +283,7 @@ class TestVRAMAccounting(unittest.IsolatedAsyncioTestCase):
 
         for i in range(3):
             ok = await loader.start()
-            self.assertTrue(ok, f"Start cycle {i} should succeed")
-            # http.server may not have GPU VRAM, so actual_vram_gb can be None.
-            # The key invariant is that it's reset after stop.
-            vram_before_stop = loader._actual_vram_gb
+            assert ok, f"Start cycle {i} should succeed"
             await loader.stop()
-            self.assertIsNone(loader._actual_vram_gb,
-                              f"VRAM should be reset after stop cycle {i}")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+            assert loader._actual_vram_gb is None, \
+                f"VRAM should be reset after stop cycle {i}"
