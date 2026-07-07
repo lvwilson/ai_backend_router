@@ -23,6 +23,7 @@ import copy
 import json
 import logging
 import random
+import time
 import uuid
 from base64 import b64encode
 from pathlib import Path
@@ -247,6 +248,7 @@ class ComfyUIClient:
 
     async def _wait_for_completion(self, ws: aiohttp.ClientWSResponse, prompt_id: str) -> None:
         """Listen on the WebSocket until our prompt finishes (or errors)."""
+        t0 = time.monotonic()
         async for msg in ws:
             if msg.type != aiohttp.WSMsgType.TEXT:
                 continue  # Binary preview frames — ignore
@@ -257,15 +259,44 @@ class ComfyUIClient:
             if payload.get("prompt_id") != prompt_id:
                 continue
             if mtype == "execution_error":
+                elapsed = time.monotonic() - t0
+                logger.error(
+                    "ComfyUI execution_error for prompt_id=%s after %.1fs: %s",
+                    prompt_id, elapsed, payload,
+                )
                 raise ComfyUIError(f"Workflow execution error: {payload}")
             if mtype == "execution_interrupted":
+                elapsed = time.monotonic() - t0
+                logger.error(
+                    "ComfyUI execution_interrupted for prompt_id=%s after %.1fs",
+                    prompt_id, elapsed,
+                )
                 raise ComfyUIError("Workflow execution was interrupted")
             # Completion signal: 'executing' with node=None, or 'execution_success'
             if mtype == "execution_success":
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    "ComfyUI execution_success for prompt_id=%s after %.1fs",
+                    prompt_id, elapsed,
+                )
                 return
             if mtype == "executing" and payload.get("node") is None:
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    "ComfyUI completed (executing=None) for prompt_id=%s after %.1fs",
+                    prompt_id, elapsed,
+                )
                 return
-        raise ComfyUIError("WebSocket closed before workflow completed")
+        elapsed = time.monotonic() - t0
+        logger.error(
+            "ComfyUI WebSocket closed before workflow completed for prompt_id=%s after %.1fs "
+            "(possible ComfyUI crash/OOM during generation)",
+            prompt_id, elapsed,
+        )
+        raise ComfyUIError(
+            f"WebSocket closed after {elapsed:.0f}s before workflow completed "
+            f"(prompt_id={prompt_id}) — ComfyUI may have crashed"
+        )
 
     async def _collect_results(self, session: aiohttp.ClientSession, prompt_id: str) -> list[dict[str, Any]]:
         """Fetch saved image records from /history and resolve local paths."""

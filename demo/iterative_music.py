@@ -473,10 +473,12 @@ def gemma_critique(
     prev_bpm: int,
     iteration: int,
     history: list,
+    concept: str = "",
 ) -> dict | None:
     """
     Send audio to gemma for critique. Returns parsed command block or None.
-    Includes iteration history so gemma can see what's been tried.
+    Includes iteration history and the original concept so gemma stays
+    anchored to the creative direction across iterations.
     """
     audio_bytes = audio_path.read_bytes()
     audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
@@ -494,6 +496,11 @@ def gemma_critique(
 
     lyrics_info = prev_lyrics if prev_lyrics else "(instrumental — no lyrics supplied)"
 
+    # Include the original concept so gemma stays anchored to the creative direction
+    concept_context = ""
+    if concept:
+        concept_context = f"\nORIGINAL CREATIVE CONCEPT (stay aligned with this):\n  {concept}\n"
+
     prompt = f"""{CRITIQUE_PROMPT.format(duration=DURATION, lines=lines)}
 
 {history_text}
@@ -503,7 +510,7 @@ Current generation parameters:
   BPM: {prev_bpm}
   Duration: {DURATION}s
   Iteration: {iteration}
-
+{concept_context}
 Please evaluate and suggest improvements."""
 
     messages = [
@@ -699,7 +706,7 @@ def main():
             break
 
         # Critique
-        critique = gemma_critique(audio_path, tags, lyrics, bpm, iteration, history)
+        critique = gemma_critique(audio_path, tags, lyrics, bpm, iteration, history, effective_concept)
         if not critique:
             fail("Critique failed, stopping.")
             break

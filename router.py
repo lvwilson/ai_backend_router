@@ -323,11 +323,18 @@ def create_app(config: RouterConfig) -> FastAPI:
             port=loader.config.port,
             output_dir=config.comfyui_output_dirs.get(music_model.backend),
         )
+        t0 = time.monotonic()
         try:
             results = await client.generate_audio(workflow)
+            elapsed = time.monotonic() - t0
+            logger.info("Music generation completed in %.1fs", elapsed)
         except ComfyUIError as exc:
+            elapsed = time.monotonic() - t0
+            logger.error("Music generation failed after %.1fs: %s", elapsed, exc)
             return error(502, f"Music generation failed: {exc}")
         except aiohttp.ClientError as exc:
+            elapsed = time.monotonic() - t0
+            logger.error("Music generation unreachable after %.1fs: %s", elapsed, exc)
             return error(503, f"ComfyUI unreachable: {exc}")
 
         # Model is now resident in the warm ComfyUI process — track its VRAM.
