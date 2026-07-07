@@ -216,9 +216,9 @@ backends:
     health_timeout: 60
     models:
       krea2:
-        workflow: ~/projectnotes/untracked/Krea2 Basic.json
+        workflow: ~/projectnotes/workflows/krea2_basic.json
         vram_usage: 28
     music_models:
       ace_step_1.5_xl_turbo:
-        workflow: ~/projectnotes/untracked/audio_ace_step1_5_xl_turbo.json
+        workflow: ~/projectnotes/workflows/audio_ace_step1_5_xl_turbo.json
         vram_usage: 28
