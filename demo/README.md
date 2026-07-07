@@ -1,4 +1,4 @@
-Iterative Music Improvement Demo
+Music Improvement Demo
 
 Uses **gemma-4-12b-it** as a music critic to iteratively improve a generated
 audio track up to 3 times, then picks the best one.
@@ -20,6 +20,18 @@ audio track up to 3 times, then picks the best one.
 3. **Improve** — Parses gemma's commands, updates the tags/lyrics, and
    regenerates. Repeats up to 3 times or until score ≥ 8.
 4. **Select** — Picks the highest-scoring track and saves it as `best_track.mp3`.
+
+## How the Music Model Works
+
+Ace Step 1.5 XL Turbo is a music diffusion model controlled by two text inputs:
+
+- **tags** — 5–8 comma-separated style descriptors (genre, mood, instrumentation).
+  This is the primary control. Must be concise (<120 chars).
+- **lyrics** — Vocal content. Leave empty for instrumental tracks. For short
+  generations (≤30s), keep lyrics brief.
+
+Both fields must be supplied for every generation — empty values produce
+meaningless output.
 
 ## Usage
 
