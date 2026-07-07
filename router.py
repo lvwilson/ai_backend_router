@@ -361,6 +361,29 @@ def create_app(config: RouterConfig) -> FastAPI:
             await asyncio.gather(*(s.stop() for s in running))
         return {"unloaded": [s.config.name for s in running]}
 
+    @app.post("/v1/models/restart-router")
+    async def restart_router():
+        """
+        Gracefully shut down all backends and exit the router process.
+
+        The watchdog will detect the exit and restart the router with a
+        clean slate (no loaded models, fresh process). Useful for tests
+        and maintenance windows.
+        """
+        running = orch._running()
+        if running:
+            logger.info("Restart-router: stopping %d backend(s) before exit", len(running))
+            await asyncio.gather(*(s.stop() for s in running))
+        logger.info("Restart-router: shutting down router process (watchdog will restart)")
+
+        async def _exit():
+            # Brief pause to let the response flush to the client.
+            await asyncio.sleep(0.5)
+            os._exit(0)
+
+        asyncio.create_task(_exit())
+        return {"restarted": True, "stopped": [s.config.name for s in running]}
+
     return app
 
 
