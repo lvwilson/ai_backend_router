@@ -14,12 +14,12 @@ import logging
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-import orchestrator as orch_mod
-import service_loader as sl_mod
-from orchestrator import InsufficientVRAMError, Orchestrator
-from service_loader import ServiceConfig
+import src.orchestrator as orch_mod
+import src.service_loader as sl_mod
+from src.orchestrator import InsufficientVRAMError, Orchestrator
+from src.service_loader import ServiceConfig
 
 logging.basicConfig(
     level=logging.INFO,

@@ -25,15 +25,15 @@ import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from service_loader import (
+from src.service_loader import (
     ServiceConfig,
     ServiceLoader,
     ServiceState,
     query_vram_used_gb,
 )
-from orchestrator import Orchestrator, InsufficientVRAMError
+from src.orchestrator import Orchestrator, InsufficientVRAMError
 
 
 def _free_port() -> int:

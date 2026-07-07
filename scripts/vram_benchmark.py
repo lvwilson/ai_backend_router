@@ -17,11 +17,11 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import load_config
-from orchestrator import Orchestrator
-from service_loader import query_per_process_vram
+from src.config import load_config
+from src.orchestrator import Orchestrator
+from src.service_loader import query_per_process_vram
 
 # How long to poll after the request completes before considering VRAM settled.
 SETTLE_TIMEOUT = 10.0

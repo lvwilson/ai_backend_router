@@ -34,11 +34,11 @@ import httpx
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
-import orchestrator as orch_mod
-import service_loader as sl_mod
-from config import load_config
+import src.orchestrator as orch_mod
+import src.service_loader as sl_mod
+from src.config import load_config
 from router import create_app
 
 # Stub GPU telemetry → deterministic tracked bookkeeping.

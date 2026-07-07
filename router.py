@@ -34,7 +34,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from comfyui import (
+from src.comfyui import (
     ComfyUIClient,
     ComfyUIError,
     build_music_openai_response,
@@ -43,8 +43,8 @@ from comfyui import (
     inject_parameters,
     parse_size,
 )
-from config import RouterConfig, load_config
-from orchestrator import InsufficientVRAMError, Orchestrator
+from src.config import RouterConfig, load_config
+from src.orchestrator import InsufficientVRAMError, Orchestrator
 
 logger = logging.getLogger("router")
 
