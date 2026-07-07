@@ -6,17 +6,20 @@ live running router.
 These tests hit a real router (default: http://127.0.0.1:8000) and validate
 all 11+ endpoints. They require the router to be running with real backends.
 
-The tests call POST /v1/models/unload-all after each test to ensure clean
-state between tests.
+At session start the tests restart the router (via the watchdog-managed
+process) to get a clean slate with the latest code. After each test,
+POST /v1/models/unload-all is called to unload all loaded models.
 
 Usage:
   pytest tests/test_live.py -v                          # default base URL
   pytest tests/test_live.py -v --base-url=http://localhost:9000
 
-Requires: httpx (async HTTP client)
+Requires: httpx (sync HTTP client)
 """
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -46,6 +49,90 @@ def parse_sse_content(raw_text: str) -> str:
             except json.JSONDecodeError:
                 pass
     return "".join(content_parts)
+
+
+def _find_router_pid() -> int | None:
+    """Find the PID of the running router.py process."""
+    result = subprocess.run(
+        ["pgrep", "-f", "python.*router\\.py"],
+        capture_output=True, text=True,
+    )
+    pids = result.stdout.strip().split()
+    if pids:
+        return int(pids[0])
+    return None
+
+
+def _restart_router() -> None:
+    """
+    Restart the router process so tests get the latest code.
+
+    Uses the POST /v1/models/restart-router endpoint which gracefully
+    stops all backends and exits. Falls back to SIGTERM if the endpoint
+    isn't available (e.g. old router code). The watchdog restarts the
+    router automatically, then we wait for /status to become available.
+    """
+    base = "http://127.0.0.1:8000"
+    client = httpx.Client(base_url=base, timeout=10)
+
+    # Try the graceful restart endpoint first.
+    try:
+        r = client.post("/v1/models/restart-router")
+        if r.status_code == 200:
+            stopped = r.json().get("stopped", [])
+            print(f"\n[live] Router restarting (stopped: {stopped})...")
+            client.close()
+        else:
+            # Endpoint exists but failed — fall through to SIGTERM.
+            print(f"\n[live] restart-router returned {r.status_code}, falling back to SIGTERM...")
+            client.close()
+            _sigterm_router()
+            return
+    except httpx.ConnectError:
+        # Router not reachable — nothing to restart.
+        client.close()
+        return
+    except Exception:
+        client.close()
+        _sigterm_router()
+        return
+
+    # Wait for watchdog to restart the router (up to 60s).
+    client = httpx.Client(base_url=base, timeout=10)
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        try:
+            r = client.get("/status")
+            if r.status_code == 200:
+                client.close()
+                print(f"[live] Router is up ({r.elapsed:.1f}s)")
+                return
+        except Exception:
+            pass
+        time.sleep(2)
+    client.close()
+    raise RuntimeError("Router did not become healthy within 60s")
+
+
+def _sigterm_router() -> None:
+    """Kill the router via SIGTERM as a fallback."""
+    pid = _find_router_pid()
+    if pid is not None:
+        print(f"\n[live] Restarting router via SIGTERM (PID {pid})...")
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        time.sleep(5)
+
+
+# ── Session-scoped: restart router once before all live tests ──────────────
+
+@pytest.fixture(scope="module", autouse=True)
+def restart_router_for_tests():
+    """Restart the router once before live tests to ensure clean state."""
+    _restart_router()
+    yield
 
 
 @pytest.fixture(scope="module")
