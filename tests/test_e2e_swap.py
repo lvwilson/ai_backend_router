@@ -34,7 +34,7 @@ import httpx
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
 import orchestrator as orch_mod
 import service_loader as sl_mod

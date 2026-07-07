@@ -12,7 +12,7 @@ import logging
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from service_loader import ServiceConfig, ServiceLoader, ServiceState, query_vram_used_gb
 
