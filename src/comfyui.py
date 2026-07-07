@@ -163,9 +163,9 @@ def inject_music_parameters(
             inputs["value"] = seed_value
 
         elif ctype == "TextEncodeAceStepAudio1.5":
-            if tags:
+            if tags is not None:
                 inputs["tags"] = tags
-            if lyrics:
+            if lyrics is not None:
                 inputs["lyrics"] = lyrics
             inputs["bpm"] = bpm
             inputs["duration"] = duration

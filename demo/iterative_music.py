@@ -51,9 +51,14 @@ DURATION = 30          # seconds per generation (short for iteration)
 BPM = 90
 SEED = 0               # 0 = randomize each generation
 MAX_ITERATIONS = 3
+MAX_RETRIES = 2        # retries per generation on 502
 GEMMA_MODEL = "gemma-4-12b-it"
 MUSIC_MODEL = "ace_step_1.5_xl_turbo"
 OUTPUT_DIR = Path(__file__).parent / "output"
+
+# Keep tags under this character limit to avoid TextEncode token overflow.
+MAX_TAGS_CHARS = 120
+
 
 # ── Colours ──────────────────────────────────────────────────────────────
 
@@ -84,8 +89,32 @@ def info(msg: str):
 
 # ── Core functions ───────────────────────────────────────────────────────
 
+def trim_tags(tags: str) -> str:
+    """
+    Ensure tags stay within MAX_TAGS_CHARS to avoid TextEncode overflow.
+
+    Strategy: keep tags in order, dropping the last ones until we fit.
+    """
+    if len(tags) <= MAX_TAGS_CHARS:
+        return tags
+    parts = [t.strip() for t in tags.split(",") if t.strip()]
+    trimmed = []
+    total = 0
+    for part in parts:
+        cost = len(part) + 2  # tag + ", "
+        if total + cost > MAX_TAGS_CHARS and trimmed:
+            break
+        trimmed.append(part)
+        total += cost
+    result = ", ".join(trimmed)
+    info(f"Trimmed tags from {len(tags)} to {len(result)} chars")
+    return result
+
+
 def generate_music(tags: str, lyrics: str, iteration: int) -> Path | None:
     """Generate a music track via the router. Returns the output file path."""
+    tags = trim_tags(tags)
+
     payload = {
         "model": MUSIC_MODEL,
         "tags": tags,
@@ -95,53 +124,123 @@ def generate_music(tags: str, lyrics: str, iteration: int) -> Path | None:
         "seed": SEED,
     }
 
-    t0 = time.time()
-    try:
-        r = requests.post(f"{BASE}/v1/music/generations", json=payload, timeout=300)
-    except Exception as e:
-        fail(f"Generation request failed: {e}")
-        return None
+    for attempt in range(1, MAX_RETRIES + 1):
+        t0 = time.time()
+        try:
+            r = requests.post(
+                f"{BASE}/v1/music/generations",
+                json=payload,
+                timeout=(15, 600),  # (connect_timeout, read_timeout)
+            )
+        except requests.exceptions.ReadTimeout:
+            # Read timeout during a long generation — may still succeed.
+            # Check if we got a response anyway (race condition).
+            elapsed = time.time() - t0
+            info(f"Read timeout after {elapsed:.0f}s (attempt {attempt}), checking response...")
+            # The response may have arrived; try to parse it
+            try:
+                data = r.json()
+                if data.get("data"):
+                    item = data["data"][0]
+                    audio_path = item.get("path")
+                    if audio_path:
+                        OUTPUT_DIR.mkdir(exist_ok=True)
+                        out = OUTPUT_DIR / f"track_iter{iteration}.mp3"
+                        import shutil
+                        shutil.copy2(audio_path, out)
+                        ok(f"Generated in {elapsed:.1f}s → {out.name} (after timeout)")
+                        return out
+            except Exception:
+                pass
+            if attempt < MAX_RETRIES:
+                fail(f"Timeout with no valid response, retrying...")
+                time.sleep(3)
+                continue
+            return None
+        except Exception as e:
+            fail(f"Generation request failed (attempt {attempt}): {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(3)
+                continue
+            return None
 
-    if r.status_code != 200:
-        fail(f"HTTP {r.status_code}: {r.text[:200]}")
-        return None
+        if r.status_code == 502 and attempt < MAX_RETRIES:
+            elapsed = time.time() - t0
+            info(f"502 on attempt {attempt} ({elapsed:.0f}s), retrying...")
+            time.sleep(3)
+            continue
 
-    elapsed = time.time() - t0
-    data = r.json()
+        if r.status_code != 200:
+            fail(f"HTTP {r.status_code}: {r.text[:200]}")
+            return None
 
-    if not data.get("data"):
-        fail("No audio data in response")
-        return None
+        elapsed = time.time() - t0
+        data = r.json()
 
-    item = data["data"][0]
-    audio_path = item.get("path")
-    if not audio_path:
-        fail("No path in response")
-        return None
+        if not data.get("data"):
+            fail("No audio data in response")
+            return None
 
-    # Copy to our output dir with a clear name
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    out = OUTPUT_DIR / f"track_iter{iteration}.mp3"
-    import shutil
-    shutil.copy2(audio_path, out)
-    ok(f"Generated in {elapsed:.1f}s → {out.name}")
-    return out
+        item = data["data"][0]
+        audio_path = item.get("path")
+        if not audio_path:
+            fail("No path in response")
+            return None
+
+        # Copy to our output dir with a clear name
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        out = OUTPUT_DIR / f"track_iter{iteration}.mp3"
+        import shutil
+        shutil.copy2(audio_path, out)
+        ok(f"Generated in {elapsed:.1f}s → {out.name}")
+        return out
+
+    fail(f"Generation failed after {MAX_RETRIES} attempts")
+    return None
+
+
+# ── System prompt for gemma critique ─────────────────────────────────────
+
+SYSTEM_PROMPT = """You are an expert music critic and producer evaluating AI-generated music.
+
+ABOUT THE MUSIC GENERATION MODEL:
+The track was generated by Ace Step 1.5 XL Turbo, a music diffusion model.
+It accepts two text inputs that fully control the output:
+
+  • tags — A concise, comma-separated list of 5–8 style descriptors.
+    Examples: "lo-fi, chill, ambient, piano, warm"
+    This is the PRIMARY control — it determines genre, mood, instrumentation,
+    and production style. Be specific but concise. Do NOT accumulate tags
+    across iterations; always provide a fresh, focused set.
+
+  • lyrics — The vocal content. Leave empty for instrumental tracks.
+    For vocal tracks, provide structured lyrics with section markers
+    like [Verse], [Chorus], [Bridge]. For short generations (≤30s),
+    keep lyrics brief — one verse or chorus is enough.
+
+Both tags and lyrics MUST be supplied for every generation. If left empty,
+the model produces nothing meaningful.
+
+YOUR TASK:
+Listen to the track, evaluate its quality, and suggest improved tags and
+lyrics for the next generation. Be constructive and specific about what
+works and what doesn't."""
 
 
 def critique_audio(audio_path: Path, prev_tags: str, prev_lyrics: str, iteration: int) -> dict:
     """
     Send audio to gemma for critique. Returns parsed command block or None.
-
-    Gemma is asked to output a structured block delimited by 3 backticks.
     """
     audio_bytes = audio_path.read_bytes()
     audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
 
-    prompt = f"""You are a music critic and producer. Listen to this generated track and evaluate it.
+    lyrics_info = prev_lyrics if prev_lyrics else "(instrumental — no lyrics supplied)"
+
+    prompt = f"""{SYSTEM_PROMPT}
 
 Current generation parameters:
   Tags: {prev_tags}
-  Lyrics: {prev_lyrics if prev_lyrics else "(instrumental)"}
+  Lyrics: {lyrics_info}
   Duration: {DURATION}s, BPM: {BPM}
   Iteration: {iteration}
 
@@ -150,14 +249,16 @@ Wrap your response in exactly 3 backticks (```) as shown:
 
 ```
 score: <integer 1-10>
-tags: <improved comma-separated tags>
+tags: <5-8 concise comma-separated style descriptors, under 120 characters>
 lyrics: <improved lyrics or "instrumental">
-feedback: <brief explanation of what to improve and why>
+feedback: <2-3 sentences explaining what to improve and why>
 ```
 
-The score should reflect overall quality. The tags should suggest improvements
-to the musical style. The feedback should explain what works and what doesn't.
-Be specific and constructive."""
+IMPORTANT:
+- Tags must be 5-8 focused descriptors, under 120 characters total.
+- Do NOT accumulate tags — pick a fresh set each time.
+- If the track should be instrumental, write "instrumental" for lyrics.
+- If vocal, provide brief lyrics appropriate for {DURATION}s."""
 
     messages = [
         {
@@ -311,7 +412,9 @@ def main():
         # Generate
         info(f"Tags: {tags}")
         if lyrics:
-            info(f"Lyrics: {lyrics}")
+            info(f"Lyrics: {lyrics[:80]}...")
+        else:
+            info("Lyrics: (instrumental)")
 
         audio_path = generate_music(tags, lyrics, iteration)
         if not audio_path:
@@ -347,7 +450,7 @@ def main():
 
         # Update parameters for next iteration
         tags = new_tags
-        lyrics = new_lyrics if new_lyrics != "instrumental" else ""
+        lyrics = new_lyrics if new_lyrics and new_lyrics.lower() != "instrumental" else ""
         info(f"Carrying forward improved parameters to iteration {iteration + 1}")
 
     if not tracks:
