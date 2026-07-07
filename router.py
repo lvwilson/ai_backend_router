@@ -22,6 +22,7 @@ Run: python router.py [config.yaml]
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
@@ -350,6 +351,15 @@ def create_app(config: RouterConfig) -> FastAPI:
     @app.get("/status")
     async def status():
         return await orch.get_status()
+
+    @app.post("/v1/models/unload-all")
+    async def unload_all():
+        """Unload all running backends. Useful for test teardown."""
+        running = orch._running()
+        if running:
+            logger.info("Unload-all: stopping %d backend(s)", len(running))
+            await asyncio.gather(*(s.stop() for s in running))
+        return {"unloaded": [s.config.name for s in running]}
 
     return app
 

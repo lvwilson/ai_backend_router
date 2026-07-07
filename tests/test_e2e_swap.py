@@ -16,7 +16,7 @@ Scenario:
                    translates via Krea2 workflow, returns image filepath
   4. Chat again  → needs 4 GB, only 1 free → evicts ComfyUI (8 GB incl. model)
 
-Run: python tests/test_e2e_swap.py
+Run: pytest tests/test_e2e_swap.py -v
 """
 
 import asyncio
@@ -26,29 +26,18 @@ import signal
 import shutil
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import aiohttp
 import httpx
+import pytest
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
-import src.orchestrator as orch_mod
-import src.service_loader as sl_mod
 from src.config import load_config
 from router import create_app
-
-# Stub GPU telemetry → deterministic tracked bookkeeping.
-# NOTE: applied/restored inside main() so that merely importing this module
-# (e.g. during pytest collection) does not pollute global state for other tests.
-async def _no_gpu(*args, **kwargs):
-    return None
-
-async def _no_per_process_vram(*args, **kwargs):
-    return {}
 
 MOCK = HERE / "mock_backend.py"
 WORKFLOW = HERE / "krea2_basic.json"
@@ -58,13 +47,7 @@ MOCK_PORTS = [18081, 18082, 18083]
 
 
 def _kill_stale_mocks() -> None:
-    """
-    Kill any leftover mock_backend processes from a previous test run.
-
-    Mock backends run on ports 18081–18083, completely separate from live
-    backends (8080, 8082, 9000–9005, 8188). This ensures stale processes
-    from a crashed test don't block the next run.
-    """
+    """Kill any leftover mock_backend processes from a previous test run."""
     import subprocess
     result = subprocess.run(
         ["pgrep", "-f", str(MOCK)],
@@ -77,8 +60,10 @@ def _kill_stale_mocks() -> None:
         except (ProcessLookupError, ValueError):
             pass
     if pids:
-        # Brief pause to let the kernel release ports.
         time.sleep(0.5)
+
+
+import time
 
 
 CONFIG_TEMPLATE = """
@@ -117,43 +102,19 @@ backends:
         vram_usage: 7
 """
 
-PASS = FAIL = 0
+
+@pytest.fixture(scope="module")
+def event_loop():
+    """Module-scoped event loop for the e2e tests."""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
 
 
-def check(label: str, ok: bool, detail: str = ""):
-    global PASS, FAIL
-    print(f"  [{'PASS' if ok else 'FAIL'}] {label}" + (f" — {detail}" if detail and not ok else ""))
-    PASS += ok
-    FAIL += not ok
-
-
-def running(orch) -> set[str]:
-    return {s.config.name for s in orch.services.values() if s.is_alive}
-
-
-async def main() -> int:
-    # Stub GPU telemetry for the duration of this test only.
-    # Both total VRAM and per-process queries must be stubbed so the test
-    # uses deterministic tracked bookkeeping (not live nvidia-smi readings).
-    orig_orch_query = orch_mod.query_vram_used_gb
-    orig_sl_query = sl_mod.query_vram_used_gb
-    orig_orch_per_pid = orch_mod.query_per_process_vram
-    orig_sl_per_pid = sl_mod.query_per_process_vram
-    orch_mod.query_vram_used_gb = _no_gpu
-    sl_mod.query_vram_used_gb = _no_gpu
-    orch_mod.query_per_process_vram = _no_per_process_vram
-    sl_mod.query_per_process_vram = _no_per_process_vram
-    try:
-        return await _run()
-    finally:
-        orch_mod.query_vram_used_gb = orig_orch_query
-        sl_mod.query_vram_used_gb = orig_sl_query
-        orch_mod.query_per_process_vram = orig_orch_per_pid
-        sl_mod.query_per_process_vram = orig_sl_per_pid
-
-
-async def _run() -> int:
-    # Clean up stale mock backends from previous runs (ports 18081–18083).
+@pytest.fixture(scope="module")
+def e2e_env():
+    """Create the e2e test environment: config, app, orchestrator, temp dir."""
     _kill_stale_mocks()
 
     outdir = tempfile.mkdtemp(prefix="router_e2e_")
@@ -164,70 +125,116 @@ async def _run() -> int:
     app = create_app(config)
     orch = app.state.orch
 
+    yield {
+        "app": app,
+        "orch": orch,
+        "outdir": outdir,
+        "config": config,
+    }
+
+    shutil.rmtree(outdir, ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+async def e2e_client(e2e_env):
+    """Create an httpx client for the e2e router app, with auto-unload on teardown."""
+    app = e2e_env["app"]
+
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://router", timeout=120) as client:
+            yield client
 
-            print("\n=== 1. Chat → llama-small launches ===")
-            r = await client.post("/v1/chat/completions", json={
-                "model": "llama-small",
-                "messages": [{"role": "user", "content": "hello"}],
-            })
-            check("chat 200", r.status_code == 200, r.text)
-            check("mock llama replied", "mock-llama-reply: hello" in r.text)
-            check("llama-small running", running(orch) == {"llama-small"}, str(running(orch)))
-
-            print("\n=== 2. Transcription → asr joins (both fit) ===")
-            r = await client.post("/v1/audio/transcriptions", files={"file": ("a.wav", b"RIFFdata")})
-            check("transcription 200", r.status_code == 200, r.text)
-            check("mock transcription text", r.json().get("text") == "mock transcription result")
-            check("llama + asr running", running(orch) == {"llama-small", "asr"}, str(running(orch)))
-
-            print("\n=== 3. Image → ComfyUI (8 GB) evicts llama + asr ===")
-            r = await client.post("/v1/images/generations", json={
-                "model": "krea2",
-                "prompt": "a red fox in the snow",
-                "size": "512x512",
-                "steps": 4,
-                "seed": 1234,
-            })
-            check("image 200", r.status_code == 200, r.text)
-            check("only comfyui running", running(orch) == {"image"}, str(running(orch)))
-
-            data = r.json()["data"]
-            check("one image returned", len(data) == 1)
-            path = data[0].get("path", "")
-            check("response includes filepath", bool(path), json.dumps(data))
-            check("image file exists on disk", Path(path).is_file(), path)
-
-            # Verify translation: real Krea2 workflow with our parameters injected.
-            async with aiohttp.ClientSession() as s:
-                async with s.get("http://127.0.0.1:18083/last_workflow") as resp:
-                    wf = await resp.json()
-            check("prompt injected into node 6", wf["6"]["inputs"]["text"] == "a red fox in the snow")
-            check("negative prompt preserved", wf["24"]["inputs"]["text"] == "Gridlines")
-            check("size injected into node 10",
-                  wf["10"]["inputs"]["width"] == 512 and wf["10"]["inputs"]["height"] == 512)
-            check("seed injected into KSampler", wf["2"]["inputs"]["seed"] == 1234)
-            check("steps injected into KSampler", wf["2"]["inputs"]["steps"] == 4)
-
-            print("\n=== 4. Chat again → llama evicts ComfyUI (model VRAM tracked) ===")
-            r = await client.post("/v1/chat/completions", json={
-                "model": "llama-small",
-                "messages": [{"role": "user", "content": "back again"}],
-            })
-            check("chat 200 after swap-back", r.status_code == 200, r.text)
-            check("comfyui evicted, llama running", running(orch) == {"llama-small"}, str(running(orch)))
-
-            print("\n=== 5. Status endpoint ===")
-            r = await client.get("/status")
-            check("status 200", r.status_code == 200)
-            check("status lists 3 services", len(r.json()["services"]) == 3)
-
-    shutil.rmtree(outdir, ignore_errors=True)
-    print(f"\n{'=' * 50}\nRESULT: {PASS} passed, {FAIL} failed")
-    return 1 if FAIL else 0
+            # Unload all models after tests
+            try:
+                await client.post("/v1/models/unload-all")
+            except Exception:
+                pass
 
 
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+def running(orch) -> set[str]:
+    return {s.config.name for s in orch.services.values() if s.is_alive}
+
+
+class TestE2ESwap:
+    """End-to-end swap tests: chat → transcribe → image → chat."""
+
+    async def test_chat_launches_llama(self, e2e_client, e2e_env):
+        """Chat → llama-small launches."""
+        orch = e2e_env["orch"]
+        r = await e2e_client.post("/v1/chat/completions", json={
+            "model": "llama-small",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        assert r.status_code == 200, r.text
+        assert "mock-llama-reply: hello" in r.text
+        assert running(orch) == {"llama-small"}, f"Expected only llama-small, got {running(orch)}"
+
+    async def test_transcription_launches_asr(self, e2e_client, e2e_env):
+        """Transcription → asr joins (both fit)."""
+        orch = e2e_env["orch"]
+        r = await e2e_client.post("/v1/audio/transcriptions",
+                                  files={"file": ("a.wav", b"RIFFdata")})
+        assert r.status_code == 200, r.text
+        assert r.json().get("text") == "mock transcription result"
+        assert running(orch) == {"llama-small", "asr"}, f"Expected llama+asr, got {running(orch)}"
+
+    async def test_image_evicts_llama_and_asr(self, e2e_client, e2e_env):
+        """Image → ComfyUI (8 GB) evicts llama + asr."""
+        orch = e2e_env["orch"]
+        r = await e2e_client.post("/v1/images/generations", json={
+            "model": "krea2",
+            "prompt": "a red fox in the snow",
+            "size": "512x512",
+            "steps": 4,
+            "seed": 1234,
+        })
+        assert r.status_code == 200, r.text
+        assert running(orch) == {"image"}, f"Expected only comfyui, got {running(orch)}"
+
+        data = r.json()["data"]
+        assert len(data) == 1
+        path = data[0].get("path", "")
+        assert path, json.dumps(data)
+        assert Path(path).is_file(), path
+
+        # Verify translation: real Krea2 workflow with our parameters injected.
+        async with aiohttp.ClientSession() as s:
+            async with s.get("http://127.0.0.1:18083/last_workflow") as resp:
+                wf = await resp.json()
+        assert wf["6"]["inputs"]["text"] == "a red fox in the snow"
+        assert wf["24"]["inputs"]["text"] == "Gridlines"
+        assert wf["10"]["inputs"]["width"] == 512 and wf["10"]["inputs"]["height"] == 512
+        assert wf["2"]["inputs"]["seed"] == 1234
+        assert wf["2"]["inputs"]["steps"] == 4
+
+    async def test_chat_after_image_evicts_comfyui(self, e2e_client, e2e_env):
+        """Chat again → llama evicts ComfyUI (model VRAM tracked)."""
+        orch = e2e_env["orch"]
+        r = await e2e_client.post("/v1/chat/completions", json={
+            "model": "llama-small",
+            "messages": [{"role": "user", "content": "back again"}],
+        })
+        assert r.status_code == 200, r.text
+        assert running(orch) == {"llama-small"}, f"Expected only llama, got {running(orch)}"
+
+    async def test_status_endpoint(self, e2e_client):
+        """Status endpoint returns fleet info."""
+        r = await e2e_client.get("/status")
+        assert r.status_code == 200
+        assert len(r.json()["services"]) == 3
+
+    async def test_unload_all_endpoint(self, e2e_client, e2e_env):
+        """POST /v1/models/unload-all stops all running backends."""
+        orch = e2e_env["orch"]
+        # First ensure something is running
+        await e2e_client.post("/v1/chat/completions", json={
+            "model": "llama-small",
+            "messages": [{"role": "user", "content": "test"}],
+        })
+        assert running(orch) == {"llama-small"}
+
+        r = await e2e_client.post("/v1/models/unload-all")
+        assert r.status_code == 200
+        assert "llama-small" in r.json()["unloaded"]
+        assert running(orch) == set()
