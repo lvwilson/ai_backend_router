@@ -52,9 +52,9 @@ except ImportError:
 
 # ── Configuration ────────────────────────────────────────────────────────
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
-CONCEPT = sys.argv[2] if len(sys.argv) > 2 else "a relaxing evening song"
-INPUT_MP3 = Path(sys.argv[3]).expanduser() if len(sys.argv) > 3 else None
+BASE = "http://127.0.0.1:8000"
+CONCEPT = sys.argv[1] if len(sys.argv) > 1 else "a relaxing evening song"
+INPUT_MP3 = Path(sys.argv[2]).expanduser() if len(sys.argv) > 2 else None
 DURATION = 120          # 2-minute songs
 BPM = None              # Let gemma decide
 SEED = 0               # 0 = randomize each generation
@@ -207,7 +207,7 @@ def generate_music(tags: str, lyrics: str, bpm: int, iteration: int) -> Path | N
 
 ANALYSIS_PROMPT = """You are a creative music director analyzing a reference track.
 
-Listen to the audio carefully and produce two things:
+Listen to the audio carefully and produce a detailed analysis. Include:
 
 1. TAGS — A concise, comma-separated list of 5–8 style descriptors
    (genre, mood, instrumentation, production style). Under 120 characters.
@@ -217,11 +217,21 @@ Listen to the audio carefully and produce two things:
    vibe, mood, and character of the track. This concept will guide the
    creative direction for new music generation inspired by this reference.
 
-Wrap your response in exactly 3 backticks (```):
+3. VOCAL STYLE — Describe the vocal performance: gender, tone, delivery
+   style (e.g., theatrical, intimate, raspy, soaring), and emotional
+   character. Do not quote specific lyrics — focus on how the vocals
+   are delivered.
+
+4. THEMES — Identify the core themes and narrative of the song. What
+   is it about? What story or emotion does it convey?
+
+Wrap your ENTIRE response in exactly 3 backticks (```):
 
 ```
 tags: <5-8 concise comma-separated style descriptors>
 concept: <a single paragraph describing the track's vibe and character>
+vocal_style: <description of vocal gender, tone, delivery, emotion>
+themes: <core themes and narrative of the song>
 ```
 
 Be specific and evocative. Focus on what makes this track distinctive."""
@@ -281,8 +291,19 @@ It accepts two text inputs that fully control the output:
   • bpm — The tempo. Adjust as needed.
 
 YOUR TASK:
-Listen to the track, evaluate its quality, and suggest improved tags,
-lyrics, and BPM for the next generation. Be constructive and specific.
+Listen to the track carefully and provide a thorough evaluation. Include:
+
+1. A detailed critique of the music (2 paragraphs):
+   - First paragraph: Analyze the musical elements — instrumentation,
+     arrangement, dynamics, production quality, and how well the tags
+     were realized in the output.
+   - Second paragraph: Analyze the vocal performance and thematic content.
+     Describe the vocal style (gender, tone, delivery, emotion) without
+     quoting specific lyrics. Discuss the overall themes, mood, and
+     narrative arc of the song. How cohesive is the artistic vision?
+
+2. Improved parameters for the next generation.
+
 Wrap your response in exactly 3 backticks (```):
 
 ```
@@ -290,7 +311,7 @@ score: <integer 1-10>
 tags: <5-8 concise comma-separated style descriptors, under 120 characters>
 lyrics: <improved structured lyrics, or empty string for instrumental>
 bpm: <integer tempo>
-feedback: <2-3 sentences explaining what to improve and why>
+feedback: <2-paragraph critique covering musical elements and vocal/thematic analysis>
 ```
 
 IMPORTANT:
@@ -298,7 +319,8 @@ IMPORTANT:
 - Do NOT accumulate tags — pick a fresh set each time.
 - If the track should be instrumental, write empty string for lyrics.
 - If vocal, provide structured lyrics appropriate for {duration}s.
-- Score 8+ means the track is excellent and no further iterations needed."""
+- Score 8+ means the track is excellent and no further iterations needed.
+- Take your time analyzing the audio thoroughly before responding."""
 
 
 def gemma_request(messages: list, max_tokens: int = 8000) -> str | None:
@@ -312,7 +334,7 @@ def gemma_request(messages: list, max_tokens: int = 8000) -> str | None:
 
     t0 = time.time()
     try:
-        r = requests.post(f"{BASE}/v1/chat/completions", json=payload, timeout=120)
+        r = requests.post(f"{BASE}/v1/chat/completions", json=payload, timeout=300)
     except Exception as e:
         fail(f"Gemma request failed: {e}")
         return None
@@ -330,7 +352,7 @@ def gemma_request(messages: list, max_tokens: int = 8000) -> str | None:
     return text
 
 
-KNOWN_KEYS = {"score", "tags", "lyrics", "bpm", "feedback", "concept"}
+KNOWN_KEYS = {"score", "tags", "lyrics", "bpm", "feedback", "concept", "vocal_style", "themes"}
 
 
 def parse_command_block(text: str) -> dict | None:
@@ -398,8 +420,28 @@ def gemma_analyze_mp3(mp3_path: Path) -> dict | None:
     """
     Send an MP3 to gemma for analysis. Returns a dict with 'tags' and
     'concept' keys that can seed the initial song parameters.
+
+    If the file is large (>5MB), trim to first 60s via ffmpeg to keep
+    the base64 payload manageable for the backend.
     """
-    audio_bytes = mp3_path.read_bytes()
+    size_mb = mp3_path.stat().st_size / (1024 * 1024)
+    audio_path = mp3_path
+
+    # Trim large files to first 60 seconds to avoid payload issues
+    if size_mb > 5:
+        info(f"Reference track is {size_mb:.1f}MB, trimming to 60s for analysis...")
+        trimmed = OUTPUT_DIR / "reference_trimmed.mp3"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(mp3_path), "-t", "60", "-q:a", "2", str(trimmed)],
+                capture_output=True, timeout=30,
+            )
+            audio_path = trimmed
+            info(f"Trimmed to {audio_path.stat().st_size / 1024:.0f}KB")
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            info(f"ffmpeg trim failed ({e}), using full file")
+
+    audio_bytes = audio_path.read_bytes()
     audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
 
     messages = [
@@ -641,11 +683,17 @@ def main():
         step("Phase 0: Analyzing reference track")
         analysis = gemma_analyze_mp3(INPUT_MP3)
         if analysis:
+            reference_parts = []
             if analysis.get("concept"):
-                effective_concept = analysis["concept"]
-                # Prepend the original concept for context
-                effective_concept = f"{CONCEPT}. Reference track analysis: {effective_concept}"
-                ok("Using analysis-derived concept for generation.")
+                reference_parts.append(f"Vibe: {analysis['concept']}")
+            if analysis.get("vocal_style"):
+                reference_parts.append(f"Vocal style: {analysis['vocal_style']}")
+            if analysis.get("themes"):
+                reference_parts.append(f"Themes: {analysis['themes']}")
+            analysis_summary = ". ".join(reference_parts)
+            effective_concept = f"{CONCEPT}. Reference track analysis: {analysis_summary}"
+            ok("Using analysis-derived concept for generation.")
+            info(f"Full analysis concept: {analysis_summary}")
             reference_tags = analysis.get("tags")
             if reference_tags:
                 ok(f"Reference tags captured: {reference_tags}")
