@@ -218,3 +218,7 @@ backends:
       krea2:
         workflow: ~/projectnotes/untracked/Krea2 Basic.json
         vram_usage: 28
+    music_models:
+      ace_step_1.5_xl_turbo:
+        workflow: ~/projectnotes/untracked/audio_ace_step1_5_xl_turbo.json
+        vram_usage: 28
