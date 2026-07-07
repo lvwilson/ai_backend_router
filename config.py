@@ -43,6 +43,15 @@ class ImageModel:
 
 
 @dataclass
+class MusicModel:
+    """A ComfyUI-served music model: workflow template + VRAM budget."""
+    name: str
+    backend: str            # Name of the comfyui backend that serves it
+    workflow: str           # Path to workflow JSON (ComfyUI API format)
+    vram_gb: float
+
+
+@dataclass
 class RouterConfig:
     host: str = "0.0.0.0"
     port: int = 8000
@@ -57,6 +66,7 @@ class RouterConfig:
     llama_backends: list[str] = field(default_factory=list)     # In config order
     audio_backends: list[str] = field(default_factory=list)     # crispasr backend names (in config order)
     image_models: dict[str, ImageModel] = field(default_factory=dict)
+    music_models: dict[str, MusicModel] = field(default_factory=dict)
     comfyui_output_dirs: dict[str, str] = field(default_factory=dict)  # backend → output dir
     backend_ports: dict[str, int] = field(default_factory=dict)
 
@@ -94,6 +104,17 @@ class RouterConfig:
         if not self.image_models:
             raise KeyError("No image models configured")
         return next(iter(self.image_models.values()))  # Default: first configured
+
+    def resolve_music_model(self, model: str | None) -> MusicModel:
+        """Map a request's `model` field to a music model (case-insensitive)."""
+        if model is not None:
+            model_lower = model.lower()
+            for key, music_model in self.music_models.items():
+                if key.lower() == model_lower:
+                    return music_model
+        if not self.music_models:
+            raise KeyError("No music models configured")
+        return next(iter(self.music_models.values()))  # Default: first configured
 
 
 def _llama_service(name: str, spec: dict, cache_dir: str | None = None) -> ServiceConfig:
@@ -222,6 +243,13 @@ def load_config(path: str | Path) -> RouterConfig:
                 cfg.comfyui_output_dirs[name] = _p(spec["output_dir"])
             for model_name, mspec in spec.get("models", {}).items():
                 cfg.image_models[model_name] = ImageModel(
+                    name=model_name,
+                    backend=name,
+                    workflow=_p(mspec["workflow"]),
+                    vram_gb=mspec.get("vram_usage", 0.0),
+                )
+            for model_name, mspec in spec.get("music_models", {}).items():
+                cfg.music_models[model_name] = MusicModel(
                     name=model_name,
                     backend=name,
                     workflow=_p(mspec["workflow"]),

@@ -10,6 +10,7 @@ Routes:
   POST /v1/translate             → CrispASR                     [passthrough]
   GET  /v1/voices                → CrispASR                     [passthrough]
   POST /v1/images/generations    → ComfyUI                      [translated]
+  POST /v1/music/generations     → ComfyUI                      [translated]
   GET  /v1/models                → router-level model list
   GET  /status                   → orchestrator fleet status
 
@@ -36,7 +37,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from comfyui import (
     ComfyUIClient,
     ComfyUIError,
+    build_music_openai_response,
     build_openai_response,
+    inject_music_parameters,
     inject_parameters,
     parse_size,
 )
@@ -263,6 +266,77 @@ def create_app(config: RouterConfig) -> FastAPI:
             response_format=req.get("response_format", "path"),
         )
 
+    # ── Music route (translated) ─────────────────────────────────────────
+
+    @app.post("/v1/music/generations")
+    async def music(request: Request):
+        try:
+            req = await request.json()
+        except json.JSONDecodeError:
+            return error(400, "Invalid JSON body")
+
+        tags = req.get("tags")
+        lyrics = req.get("lyrics")
+        if not tags and not lyrics:
+            return error(400, "Missing required fields: at least one of 'tags' or 'lyrics' is required")
+
+        try:
+            music_model = config.resolve_music_model(req.get("model"))
+        except KeyError as exc:
+            return error(400, str(exc))
+
+        try:
+            workflow = json.loads(Path(music_model.workflow).read_text())
+            workflow = inject_music_parameters(
+                workflow,
+                tags=tags,
+                lyrics=lyrics,
+                duration=req.get("duration", 144),
+                bpm=req.get("bpm", 120),
+                seed=req.get("seed"),
+                timesignature=req.get("timesignature", "4"),
+                language=req.get("language", "en"),
+                keyscale=req.get("keyscale", "E minor"),
+                cfg_scale=req.get("cfg_scale", 2.0),
+                temperature=req.get("temperature", 0.85),
+                top_p=req.get("top_p", 0.9),
+                top_k=req.get("top_k", 0),
+                min_p=req.get("min_p", 0.0),
+                steps=req.get("steps"),
+                cfg=req.get("cfg"),
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            return error(500, f"Workflow '{music_model.workflow}' unavailable: {exc}")
+        except ComfyUIError as exc:
+            return error(400, str(exc))
+
+        # Launch/reuse ComfyUI with room for this specific model's VRAM.
+        try:
+            loader = await orch.ensure_running(music_model.backend, extra_vram_gb=music_model.vram_gb)
+        except InsufficientVRAMError as exc:
+            return error(507, str(exc))
+        except (KeyError, RuntimeError) as exc:
+            return error(503, str(exc))
+
+        client = ComfyUIClient(
+            port=loader.config.port,
+            output_dir=config.comfyui_output_dirs.get(music_model.backend),
+        )
+        try:
+            results = await client.generate_audio(workflow)
+        except ComfyUIError as exc:
+            return error(502, f"Music generation failed: {exc}")
+        except aiohttp.ClientError as exc:
+            return error(503, f"ComfyUI unreachable: {exc}")
+
+        # Model is now resident in the warm ComfyUI process — track its VRAM.
+        orch.note_extra_vram(music_model.backend, music_model.vram_gb)
+
+        return build_music_openai_response(
+            results,
+            created=int(time.time()),
+        )
+
     # ── Ops routes ───────────────────────────────────────────────────────
 
     @app.get("/v1/models")
@@ -270,6 +344,7 @@ def create_app(config: RouterConfig) -> FastAPI:
         data = [{"id": n, "object": "model", "owned_by": "llama"} for n in config.llama_backends]
         data += [{"id": n, "object": "model", "owned_by": "crispasr"} for n in config.audio_backends]
         data += [{"id": n, "object": "model", "owned_by": "comfyui"} for n in config.image_models]
+        data += [{"id": n, "object": "model", "owned_by": "comfyui", "type": "music"} for n in config.music_models]
         return {"object": "list", "data": data}
 
     @app.get("/status")

@@ -116,6 +116,94 @@ def parse_size(size: str | None) -> tuple[int | None, int | None]:
         raise ComfyUIError(f"Invalid size '{size}' — expected WIDTHxHEIGHT")
 
 
+def inject_music_parameters(
+    workflow: dict,
+    tags: str,
+    lyrics: str,
+    duration: int = 144,
+    bpm: int = 120,
+    seed: int | None = None,
+    timesignature: str = "4",
+    language: str = "en",
+    keyscale: str = "E minor",
+    cfg_scale: float = 2.0,
+    temperature: float = 0.85,
+    top_p: float = 0.9,
+    top_k: int = 0,
+    min_p: float = 0.0,
+    steps: int | None = None,
+    cfg: float | None = None,
+) -> dict:
+    """
+    Return a copy of the Ace Step music workflow with request parameters injected.
+
+    Updates nodes:
+      • KSampler (3)       → seed, steps, cfg
+      • PrimitiveInt (109) → seed value (shared seed source)
+      • TextEncodeAceStepAudio1.5 (94) → tags, lyrics, seed, bpm, duration, timesignature, language, keyscale, cfg_scale, temperature, top_p, top_k, min_p
+      • EmptyAceStep1.5LatentAudio (98) → seconds (duration)
+    """
+    wf = copy.deepcopy(workflow)
+    seed_value = seed if seed is not None and seed != 0 else random.randint(0, 2**48)
+
+    for node in wf.values():
+        ctype = node.get("class_type", "")
+        inputs = node.get("inputs", {})
+
+        if ctype == "KSampler":
+            # seed is a link [node_id, slot] — don't change the slot index,
+            # the actual value comes from the linked PrimitiveInt node.
+            if steps is not None:
+                inputs["steps"] = steps
+            if cfg is not None:
+                inputs["cfg"] = cfg
+
+        elif ctype == "PrimitiveInt":
+            # The shared seed source node — set the actual seed value here.
+            inputs["value"] = seed_value
+
+        elif ctype == "TextEncodeAceStepAudio1.5":
+            if tags:
+                inputs["tags"] = tags
+            if lyrics:
+                inputs["lyrics"] = lyrics
+            inputs["bpm"] = bpm
+            inputs["duration"] = duration
+            inputs["timesignature"] = timesignature
+            inputs["language"] = language
+            inputs["keyscale"] = keyscale
+            inputs["cfg_scale"] = cfg_scale
+            inputs["temperature"] = temperature
+            inputs["top_p"] = top_p
+            inputs["top_k"] = top_k
+            inputs["min_p"] = min_p
+            # seed is a link [node_id, slot] — leave it, value comes from PrimitiveInt
+
+        elif ctype == "EmptyAceStep1.5LatentAudio":
+            inputs["seconds"] = duration
+
+    return wf
+
+
+def build_music_openai_response(
+    audios: list[dict[str, Any]],
+    created: int,
+) -> dict[str, Any]:
+    """
+    Build an OpenAI-style /v1/music/generations response.
+
+    Each data item includes the local `path` where ComfyUI saved the audio file.
+    """
+    data = []
+    for audio in audios:
+        item: dict[str, Any] = {}
+        if "path" in audio:
+            item["path"] = audio["path"]
+        item["comfyui"] = {k: audio[k] for k in ("filename", "subfolder", "type") if k in audio}
+        data.append(item)
+    return {"created": created, "data": data}
+
+
 # ── Client ─────────────────────────────────────────────────────────────────
 
 class ComfyUIClient:
@@ -202,6 +290,46 @@ class ComfyUIClient:
         if not images:
             raise ComfyUIError(f"Workflow {prompt_id} completed but produced no output images")
         return images
+
+    async def generate_audio(self, workflow: dict) -> list[dict[str, Any]]:
+        """
+        Run a workflow to completion and collect audio outputs.
+
+        Returns a list of audio records: {"path": str, "filename": str, ...}.
+        """
+        client_id = uuid.uuid4().hex
+
+        timeout = aiohttp.ClientTimeout(total=GENERATION_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.ws_connect(f"{self.ws_url}?clientId={client_id}") as ws:
+                prompt_id = await self._submit(session, workflow, client_id)
+                await self._wait_for_completion(ws, prompt_id)
+            return await self._collect_audio_results(session, prompt_id)
+
+    async def _collect_audio_results(self, session: aiohttp.ClientSession, prompt_id: str) -> list[dict[str, Any]]:
+        """Fetch saved audio records from /history and resolve local paths."""
+        async with session.get(f"{self.base}/history/{prompt_id}") as resp:
+            if resp.status != 200:
+                raise ComfyUIError(f"GET /history failed ({resp.status})")
+            history = await resp.json()
+
+        entry = history.get(prompt_id, {})
+        audios: list[dict[str, Any]] = []
+        for node_output in entry.get("outputs", {}).values():
+            # Audio nodes output under "audio" key (e.g. SaveAudioMP3)
+            for audio in node_output.get("audio", []):
+                if audio.get("type") != "output":
+                    continue
+                record = dict(audio)
+                if self.output_dir is not None:
+                    record["path"] = str(
+                        self.output_dir / audio.get("subfolder", "") / audio["filename"]
+                    )
+                audios.append(record)
+
+        if not audios:
+            raise ComfyUIError(f"Workflow {prompt_id} completed but produced no output audio")
+        return audios
 
 
 # ── OpenAI-style response assembly ─────────────────────────────────────────
