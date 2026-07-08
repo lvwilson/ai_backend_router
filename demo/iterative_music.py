@@ -3,10 +3,12 @@
 iterative_music.py — Gemma drives an agentic music creation loop.
 
 Pipeline:
-  1. Gemma decides the song concept: genre, style, tags, and lyrics.
+  1. Gemma decides the song concept: genre, style, tags, lyrics, key,
+     time signature, and language.
   2. Generate the music via the router's /v1/music/generations endpoint.
   3. Send the audio back to gemma for critique and improvement commands.
-  4. Gemma decides new tags/lyrics/feedback for the next iteration.
+  4. Gemma decides new tags/lyrics/key/timesignature/language for the next
+     iteration.
   5. Repeat up to MAX_ITERATIONS or until gemma scores 8+.
   6. Pick the best track based on gemma's scoring.
 
@@ -16,18 +18,30 @@ Usage:
 Defaults:
   BASE_URL     = http://127.0.0.1:8000
   CONCEPT      = "a relaxing evening song"  (gemma expands this)
-  INPUT_MP3    = None  (if given, gemma analyzes it for initial tags/concept)
+  INPUT_MP3    = None  (if given, gemma analyzes it for initial parameters)
 
 When INPUT_MP3 is provided:
-  Gemma listens to the reference track and produces suggested tags and a
-  one-paragraph concept. These are used as the starting point for the
-  agentic loop instead of the text CONCEPT alone.
+  Gemma listens to the reference track and produces suggested tags, key,
+  time signature, language, and a concept paragraph. These seed the initial
+  song parameters, overriding Gemma's generated values.
+
+Musical parameters controlled by Gemma:
+  • tags          — Style descriptors (genre, mood, instrumentation)
+  • lyrics        — Structured lyrics with section markers
+  • bpm           — Tempo
+  • key           — Musical key (e.g. "C major", "A minor")
+  • timesignature — Meter (e.g. "4" for 4/4, "3" for 3/4)
+  • language      — Vocal language (e.g. "en", "ja", "fr")
 
 Gemma command format (3 backticks):
 ```
 score: 7
 tags: lo-fi, chill, ambient, soft piano, warm
 lyrics: [Verse]...
+bpm: 90
+key: A minor
+timesignature: 4
+language: en
 feedback: The track is pleasant but lacks energy in the middle section.
 ```
 """
@@ -57,6 +71,9 @@ CONCEPT = sys.argv[1] if len(sys.argv) > 1 else "a relaxing evening song"
 INPUT_MP3 = Path(sys.argv[2]).expanduser() if len(sys.argv) > 2 else None
 DURATION = 120          # 2-minute songs
 BPM = None              # Let gemma decide
+KEY = None              # e.g. "C major", "A minor" — let gemma decide
+TIMESIGNATURE = None    # e.g. "4" for 4/4 — let gemma decide
+LANGUAGE = None         # e.g. "en" — let gemma decide from lyrics
 SEED = 0               # 0 = randomize each generation
 MAX_ITERATIONS = 4
 MAX_RETRIES = 2        # retries per generation on 502
@@ -120,7 +137,15 @@ def trim_tags(tags: str) -> str:
     return result
 
 
-def generate_music(tags: str, lyrics: str, bpm: int, iteration: int) -> Path | None:
+def generate_music(
+    tags: str,
+    lyrics: str,
+    bpm: int,
+    iteration: int,
+    key: str | None = None,
+    timesignature: str | None = None,
+    language: str | None = None,
+) -> Path | None:
     """Generate a music track via the router. Returns the output file path."""
     tags = trim_tags(tags)
 
@@ -133,6 +158,12 @@ def generate_music(tags: str, lyrics: str, bpm: int, iteration: int) -> Path | N
     }
     if bpm is not None:
         payload["bpm"] = bpm
+    if key is not None:
+        payload["keyscale"] = key
+    if timesignature is not None:
+        payload["timesignature"] = timesignature
+    if language is not None:
+        payload["language"] = language
 
     for attempt in range(1, MAX_RETRIES + 1):
         t0 = time.time()
@@ -225,6 +256,15 @@ Listen to the audio carefully and produce a detailed analysis. Include:
 4. THEMES — Identify the core themes and narrative of the song. What
    is it about? What story or emotion does it convey?
 
+5. MUSICAL KEY — Identify the key (e.g., "C major", "A minor", "D minor").
+   If uncertain, give your best estimate.
+
+6. TIME SIGNATURE — Identify the meter (e.g., "4" for 4/4, "3" for 3/4,
+   "6" for 6/8). Default to "4" if unsure.
+
+7. LANGUAGE — Identify the language of the vocals (e.g., "en", "ja", "fr",
+   "es"). Use ISO 639-1 codes. If instrumental, use "en".
+
 Wrap your ENTIRE response in exactly 3 backticks (```):
 
 ```
@@ -232,6 +272,9 @@ tags: <5-8 concise comma-separated style descriptors>
 concept: <a single paragraph describing the track's vibe and character>
 vocal_style: <description of vocal gender, tone, delivery, emotion>
 themes: <core themes and narrative of the song>
+key: <musical key, e.g. "C major" or "A minor">
+timesignature: <time signature number, e.g. "4">
+language: <ISO 639-1 language code, e.g. "en">
 ```
 
 Be specific and evocative. Focus on what makes this track distinctive."""
@@ -255,15 +298,28 @@ It accepts these text inputs:
 
   • bpm — The tempo. Choose something appropriate for the genre.
 
+  • keyscale — The musical key, e.g. "C major", "A minor", "D minor".
+    Choose a key that fits the mood and genre.
+
+  • timesignature — The time signature as a number: "4" for 4/4,
+    "3" for 3/4, "6" for 6/8, etc. Default to "4" if unsure.
+
+  • language — The language code for vocals (e.g. "en", "ja", "fr", "es").
+    Use ISO 639-1 codes. For instrumental tracks, use "en".
+
 YOUR TASK:
-Based on the concept below, design the initial tags, lyrics, and BPM.
-Be creative and specific. Wrap your response in exactly 3 backticks (```):
+Based on the concept below, design the initial tags, lyrics, BPM, key,
+time signature, and language. Be creative and specific. Wrap your
+response in exactly 3 backticks (```):
 
 ```
 score: 0
 tags: <5-8 concise comma-separated style descriptors>
 lyrics: <structured lyrics with section markers, or empty for instrumental>
 bpm: <integer tempo>
+key: <musical key, e.g. "C major">
+timesignature: <time signature number, e.g. "4">
+language: <ISO 639-1 language code, e.g. "en">
 feedback: <brief explanation of your creative choices>
 ```
 
@@ -276,7 +332,7 @@ CRITIQUE_PROMPT = """You are an expert music critic and producer evaluating AI-g
 
 ABOUT THE MUSIC GENERATION MODEL:
 The track was generated by Ace Step 1.5 XL Turbo, a music diffusion model.
-It accepts two text inputs that fully control the output:
+It accepts these text inputs that fully control the output:
 
   • tags — A concise, comma-separated list of 5–8 style descriptors.
     This is the PRIMARY control — it determines genre, mood, instrumentation,
@@ -290,13 +346,22 @@ It accepts two text inputs that fully control the output:
 
   • bpm — The tempo. Adjust as needed.
 
+  • keyscale — The musical key, e.g. "C major", "A minor". Adjust if
+    the key doesn't serve the mood.
+
+  • timesignature — The time signature: "4" for 4/4, "3" for 3/4,
+    "6" for 6/8. Change only if a different meter would improve the track.
+
+  • language — The language code for vocals (e.g. "en", "ja", "fr").
+    Use ISO 639-1 codes.
+
 YOUR TASK:
 Listen to the track carefully and provide a thorough evaluation. Include:
 
 1. A detailed critique of the music (2 paragraphs):
    - First paragraph: Analyze the musical elements — instrumentation,
-     arrangement, dynamics, production quality, and how well the tags
-     were realized in the output.
+     arrangement, dynamics, production quality, key/mode feel, and how
+     well the tags were realized in the output.
    - Second paragraph: Analyze the vocal performance and thematic content.
      Describe the vocal style (gender, tone, delivery, emotion) without
      quoting specific lyrics. Discuss the overall themes, mood, and
@@ -311,6 +376,9 @@ score: <integer 1-10>
 tags: <5-8 concise comma-separated style descriptors, under 120 characters>
 lyrics: <improved structured lyrics, or empty string for instrumental>
 bpm: <integer tempo>
+key: <musical key, e.g. "C major">
+timesignature: <time signature number, e.g. "4">
+language: <ISO 639-1 language code, e.g. "en">
 feedback: <2-paragraph critique covering musical elements and vocal/thematic analysis>
 ```
 
@@ -352,7 +420,7 @@ def gemma_request(messages: list, max_tokens: int = 8000) -> str | None:
     return text
 
 
-KNOWN_KEYS = {"score", "tags", "lyrics", "bpm", "feedback", "concept", "vocal_style", "themes"}
+KNOWN_KEYS = {"score", "tags", "lyrics", "bpm", "feedback", "concept", "vocal_style", "themes", "key", "timesignature", "language"}
 
 
 def parse_command_block(text: str) -> dict | None:
@@ -405,6 +473,13 @@ def parse_command_block(text: str) -> dict | None:
                         result["bpm"] = int(value)
                     except ValueError:
                         result["bpm"] = 90
+                elif key == "timesignature":
+                    # Accept as string; default to "4" if not parseable
+                    try:
+                        ts = int(value)
+                        result["timesignature"] = str(ts)
+                    except ValueError:
+                        result["timesignature"] = "4"
                 else:
                     result[key] = value
                 continue
@@ -461,6 +536,12 @@ def gemma_analyze_mp3(mp3_path: Path) -> dict | None:
     parsed = parse_command_block(text)
     if parsed and parsed.get("tags"):
         ok(f"Reference analysis — tags: {parsed['tags']}")
+        if parsed.get("key"):
+            ok(f"Key: {parsed['key']}")
+        if parsed.get("timesignature"):
+            ok(f"Time signature: {parsed['timesignature']}/4")
+        if parsed.get("language"):
+            ok(f"Language: {parsed['language']}")
         if parsed.get("concept"):
             info("Concept:")
             for lline in parsed["concept"].split("\n"):
@@ -502,6 +583,12 @@ def gemma_concept(concept: str) -> dict | None:
             info("Instrumental (no lyrics)")
         if parsed.get("bpm"):
             info(f"BPM: {parsed['bpm']}")
+        if parsed.get("key"):
+            info(f"Key: {parsed['key']}")
+        if parsed.get("timesignature"):
+            info(f"Time signature: {parsed['timesignature']}/4")
+        if parsed.get("language"):
+            info(f"Language: {parsed['language']}")
     else:
         info(f"Raw gemma response: {text[:200]}")
 
@@ -513,6 +600,9 @@ def gemma_critique(
     prev_tags: str,
     prev_lyrics: str,
     prev_bpm: int,
+    prev_key: str,
+    prev_timesignature: str,
+    prev_language: str,
     iteration: int,
     history: list,
     concept: str = "",
@@ -534,7 +624,7 @@ def gemma_critique(
         for i, h in enumerate(history):
             hist_lyr = h.get("lyrics", "")
             lyr_summary = hist_lyr[:120] + "..." if len(hist_lyr) > 120 else hist_lyr
-            history_text += f"  Iter {i+1}: score={h['score']}, tags={h.get('tags', '')}, bpm={h.get('bpm', '?')}, lyrics={lyr_summary}, feedback={h.get('feedback', '')[:100]}\n"
+            history_text += f"  Iter {i+1}: score={h['score']}, tags={h.get('tags', '')}, bpm={h.get('bpm', '?')}, key={h.get('key', '?')}, ts={h.get('timesignature', '?')}, lang={h.get('language', '?')}, lyrics={lyr_summary}, feedback={h.get('feedback', '')[:100]}\n"
 
     lyrics_info = prev_lyrics if prev_lyrics else "(instrumental — no lyrics supplied)"
 
@@ -550,6 +640,9 @@ Current generation parameters:
   Tags: {prev_tags}
   Lyrics: {lyrics_info}
   BPM: {prev_bpm}
+  Key: {prev_key}
+  Time signature: {prev_timesignature}/4
+  Language: {prev_language}
   Duration: {DURATION}s
   Iteration: {iteration}
 {concept_context}
@@ -678,6 +771,7 @@ def main():
     # ── Phase 0: Analyze reference MP3 if provided ─────────────────────
     effective_concept = CONCEPT
     reference_tags = None
+    analysis = None
 
     if INPUT_MP3:
         step("Phase 0: Analyzing reference track")
@@ -712,6 +806,9 @@ def main():
     tags = concept.get("tags", "")
     lyrics = concept.get("lyrics", "")
     bpm = concept.get("bpm", 90)
+    key = concept.get("key", "E minor")
+    timesignature = concept.get("timesignature", "4")
+    language = concept.get("language", "en")
     if lyrics and lyrics.lower() in ("instrumental", "empty", ""):
         lyrics = ""
 
@@ -719,6 +816,17 @@ def main():
     if reference_tags:
         info(f"Overriding tags with reference analysis: {reference_tags}")
         tags = reference_tags
+    # Also prefer reference analysis key/timesignature/language if available
+    if INPUT_MP3 and analysis:
+        if analysis.get("key"):
+            info(f"Overriding key with reference analysis: {analysis['key']}")
+            key = analysis["key"]
+        if analysis.get("timesignature"):
+            info(f"Overriding timesignature with reference analysis: {analysis['timesignature']}")
+            timesignature = analysis["timesignature"]
+        if analysis.get("language"):
+            info(f"Overriding language with reference analysis: {analysis['language']}")
+            language = analysis["language"]
 
     print(f"\n  {BOLD}Initial design:{RESET}")
     print(f"  {BOLD}Tags:{RESET} {tags}")
@@ -729,9 +837,12 @@ def main():
     else:
         print(f"  {BOLD}Lyrics:{RESET} (instrumental)")
     print(f"  {BOLD}BPM:{RESET} {bpm}")
+    print(f"  {BOLD}Key:{RESET} {key}")
+    print(f"  {BOLD}Time sig:{RESET} {timesignature}/4")
+    print(f"  {BOLD}Language:{RESET} {language}")
 
     # ── Phase 2: Agentic generation loop ────────────────────────────────
-    tracks = []  # (iteration, path, score, feedback, tags, lyrics, bpm)
+    tracks = []  # (iteration, path, score, feedback, tags, lyrics, bpm, key, timesignature, language)
     history = []  # for gemma context
 
     for iteration in range(1, MAX_ITERATIONS + 1):
@@ -746,15 +857,18 @@ def main():
         else:
             info("Lyrics: (instrumental)")
         info(f"BPM: {bpm}")
+        info(f"Key: {key}")
+        info(f"Time sig: {timesignature}/4")
+        info(f"Language: {language}")
 
         # Generate
-        audio_path = generate_music(tags, lyrics, bpm, iteration)
+        audio_path = generate_music(tags, lyrics, bpm, iteration, key, timesignature, language)
         if not audio_path:
             fail("Generation failed, stopping.")
             break
 
         # Critique
-        critique = gemma_critique(audio_path, tags, lyrics, bpm, iteration, history, effective_concept)
+        critique = gemma_critique(audio_path, tags, lyrics, bpm, key, timesignature, language, iteration, history, effective_concept)
         if not critique:
             fail("Critique failed, stopping.")
             break
@@ -764,6 +878,9 @@ def main():
         new_tags = critique.get("tags", tags)
         new_lyrics = critique.get("lyrics", lyrics)
         new_bpm = critique.get("bpm", bpm)
+        new_key = critique.get("key", key)
+        new_timesignature = critique.get("timesignature", timesignature)
+        new_language = critique.get("language", language)
 
         print(f"\n  {BOLD}Score: {score}/10{RESET}")
         if feedback:
@@ -781,13 +898,22 @@ def main():
                 print(f"    (instrumental)")
         if new_bpm != bpm:
             print(f"  {YELLOW}New BPM:{RESET} {new_bpm}")
+        if new_key != key:
+            print(f"  {YELLOW}New key:{RESET} {new_key}")
+        if new_timesignature != timesignature:
+            print(f"  {YELLOW}New time sig:{RESET} {new_timesignature}/4")
+        if new_language != language:
+            print(f"  {YELLOW}New language:{RESET} {new_language}")
 
-        tracks.append((iteration, audio_path, score, feedback, tags, lyrics, bpm))
+        tracks.append((iteration, audio_path, score, feedback, tags, lyrics, bpm, key, timesignature, language))
         history.append({
             "score": score,
             "tags": tags,
             "lyrics": lyrics if lyrics else "",
             "bpm": bpm,
+            "key": key,
+            "timesignature": timesignature,
+            "language": language,
             "feedback": feedback,
         })
 
@@ -799,6 +925,9 @@ def main():
         tags = new_tags
         lyrics = new_lyrics if new_lyrics and new_lyrics.lower() not in ("instrumental", "empty", "") else ""
         bpm = new_bpm
+        key = new_key
+        timesignature = new_timesignature
+        language = new_language
         info(f"Carrying forward gemma's improved parameters to iteration {iteration + 1}")
 
     if not tracks:
@@ -809,11 +938,14 @@ def main():
     step("Selecting best track")
 
     best = max(tracks, key=lambda t: t[2])
-    best_iter, best_path, best_score, best_feedback, best_tags, best_lyrics, best_bpm = best
+    best_iter, best_path, best_score, best_feedback, best_tags, best_lyrics, best_bpm, best_key, best_ts, best_lang = best
 
     print(f"\n  {BOLD}Best track: Iteration {best_iter}{RESET}")
     print(f"  {BOLD}Score: {best_score}/10{RESET}")
     print(f"  {BOLD}File: {best_path.name}{RESET}")
+    print(f"  {BOLD}Key: {best_key}{RESET}")
+    print(f"  {BOLD}Time sig: {best_ts}/4{RESET}")
+    print(f"  {BOLD}Language: {best_lang}{RESET}")
 
     best_final = OUTPUT_DIR / "best_track.mp3"
     shutil.copy2(best_path, best_final)
@@ -823,12 +955,12 @@ def main():
     print(f"\n{BOLD}{'=' * 60}{RESET}")
     print(f"{BOLD}  Results Summary{RESET}")
     print(f"{BOLD}{'=' * 60}{RESET}")
-    print(f"  {'Iter':<6} {'Score':<8} {'BPM':<6} {'File':<25} {'Feedback'}")
-    print(f"  {'─' * 56}")
-    for it, path, sc, fb, tg, ly, bp in tracks:
+    print(f"  {'Iter':<6} {'Score':<8} {'BPM':<6} {'Key':<12} {'TS':<4} {'Lang':<5} {'File':<25} {'Feedback'}")
+    print(f"  {'─' * 72}")
+    for it, path, sc, fb, tg, ly, bp, ky, ts, lg in tracks:
         marker = " ★" if it == best_iter else ""
         fb_short = (fb[:40] + "..") if len(fb) > 40 else fb
-        print(f"  {it:<6} {sc:<8} {bp:<6} {path.name:<25}{fb_short}{marker}")
+        print(f"  {it:<6} {sc:<8} {bp:<6} {ky:<12} {ts:<4} {lg:<5} {path.name:<25}{fb_short}{marker}")
 
     # ── Play the best ──────────────────────────────────────────────────
     step("Playing best track")
