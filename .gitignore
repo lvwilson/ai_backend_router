@@ -36,3 +36,17 @@ logs/
 
 # Untracked work
 untracked/
+
+# Audio files
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
+*.aac
+demo/output/*.mp3
+demo/output/*.wav
+demo/output/*.flac
+demo/output/*.ogg
+demo/output/*.m4a
+demo/output/*.aac
