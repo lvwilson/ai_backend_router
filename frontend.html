@@ -475,30 +475,56 @@ function buildBody(ep) {
   return body;
 }
 
-function showResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
+async function loadImageData(base, path) {
+  try {
+    const r = await fetch(`${base}/v1/image-data/${encodeURIComponent(path)}`);
+    if (r.ok) {
+      const d = await r.json();
+      return d.b64_json ? `data:${d.content_type};base64,${d.b64_json}` : null;
+    }
+  } catch {}
+  return null;
+}
+
+async function showResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
   statusEl.textContent = `${r.status} ${r.statusText}`;
   statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
   metaEl.textContent = `${elapsed}s  |  ${r.headers.get("content-type") || "unknown"}`;
   const ct = r.headers.get("content-type") || "";
   if (ct.includes("json")) {
-    r.json().then(d => {
-      // Check if this is an image generation response with paths or b64_json
-      if (Array.isArray(d.data) && d.data.length > 0 && (d.data[0].path || d.data[0].b64_json)) {
-        let imgHtml = "";
-        for (const item of d.data) {
-          if (item.b64_json) {
-            imgHtml += `<div style="margin-top:12px;"><img src="data:image/png;base64,${item.b64_json}" style="max-width:100%;border-radius:var(--radius);"></div>`;
-          } else if (item.path) {
-            const proxyUrl = `${base}/static/${encodeURIComponent(item.path)}`;
-            const fileUrl = "file://" + item.path;
-            imgHtml += `<div style="margin-top:12px;"><img src="${proxyUrl}" onerror="this.src='${fileUrl}'" style="max-width:100%;border-radius:var(--radius);"><br><a href="${proxyUrl}" style="color:var(--accent);font-size:12px;">${escHtml(item.path)}</a></div>`;
+    const d = await r.json();
+    // Check if this is an image generation response with paths or b64_json
+    if (Array.isArray(d.data) && d.data.length > 0 && (d.data[0].path || d.data[0].b64_json)) {
+      bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} image(s) generated — loading…</div>`;
+      const imgDivs = [];
+      for (const item of d.data) {
+        const div = document.createElement("div");
+        div.style.marginTop = "12px";
+        if (item.b64_json) {
+          div.innerHTML = `<img src="data:image/png;base64,${item.b64_json}" style="max-width:100%;border-radius:var(--radius);">`;
+        } else if (item.path) {
+          div.innerHTML = `<img src="" style="max-width:100%;border-radius:var(--radius);display:none;"><span style="font-size:12px;color:var(--muted);">loading…</span>`;
+          const img = div.querySelector("img");
+          const loading = div.querySelector("span");
+          const src = await loadImageData(base, item.path);
+          if (src) {
+            img.src = src;
+            img.style.display = "block";
+            loading.style.display = "none";
+          } else {
+            loading.textContent = `⚠ Could not load: ${escHtml(item.path)}`;
           }
         }
-        bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} image(s) generated</div>${imgHtml}<details style="margin-top:12px;"><summary style="cursor:pointer;font-size:12px;color:var(--muted);">Show raw JSON</summary><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;">${syntaxHighlight(JSON.stringify(d, null, 2))}</pre></details>`;
-      } else {
-        bodyEl.innerHTML = syntaxHighlight(JSON.stringify(d, null, 2));
+        bodyEl.appendChild(div);
       }
-    });
+      // Add collapsible raw JSON
+      const details = document.createElement("details");
+      details.style.marginTop = "12px";
+      details.innerHTML = `<summary style="cursor:pointer;font-size:12px;color:var(--muted);">Show raw JSON</summary><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;">${syntaxHighlight(JSON.stringify(d, null, 2))}</pre>`;
+      bodyEl.appendChild(details);
+    } else {
+      bodyEl.innerHTML = syntaxHighlight(JSON.stringify(d, null, 2));
+    }
   } else {
     r.text().then(t => { bodyEl.innerHTML = escHtml(t); });
   }
@@ -519,28 +545,40 @@ function showAudioResponse(r, elapsed, statusEl, metaEl, bodyEl) {
   }
 }
 
-function showMusicResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
+async function showMusicResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
   statusEl.textContent = `${r.status} ${r.statusText}`;
   statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
   metaEl.textContent = `${elapsed}s  |  ${r.headers.get("content-type") || "unknown"}`;
   if (r.ok) {
-    r.json().then(d => {
-      if (Array.isArray(d.data) && d.data.length > 0) {
-        let audioHtml = "";
-        for (const item of d.data) {
-          const path = item.path || item.url || "";
-          if (path) {
-            // Try serving via the router's static file proxy, fall back to file://
-            const proxyUrl = `${base}/static/${encodeURIComponent(path)}`;
-            const fileUrl = "file://" + path;
-            audioHtml += `<div style="margin-top:12px;"><audio controls src="${proxyUrl}" onerror="this.src='${fileUrl}'" style="width:100%;"></audio><br><span style="font-size:11px;color:var(--muted);">${escHtml(path)}</span></div>`;
+    const d = await r.json();
+    if (Array.isArray(d.data) && d.data.length > 0) {
+      bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} audio file(s) generated — loading…</div>`;
+      for (const item of d.data) {
+        const path = item.path || item.url || "";
+        if (path) {
+          const div = document.createElement("div");
+          div.style.marginTop = "12px";
+          div.innerHTML = `<audio controls style="width:100%;display:none;"></audio><span style="font-size:12px;color:var(--muted);">loading…</span>`;
+          const audio = div.querySelector("audio");
+          const loading = div.querySelector("span");
+          const src = await loadImageData(base, path);
+          if (src) {
+            audio.src = src;
+            audio.style.display = "block";
+            loading.style.display = "none";
+          } else {
+            loading.textContent = `⚠ Could not load: ${escHtml(path)}`;
           }
+          bodyEl.appendChild(div);
         }
-        bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} audio file(s) generated</div>${audioHtml}<details style="margin-top:12px;"><summary style="cursor:pointer;font-size:12px;color:var(--muted);">Show raw JSON</summary><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;">${syntaxHighlight(JSON.stringify(d, null, 2))}</pre></details>`;
-      } else {
-        bodyEl.innerHTML = syntaxHighlight(JSON.stringify(d, null, 2));
       }
-    });
+      const details = document.createElement("details");
+      details.style.marginTop = "12px";
+      details.innerHTML = `<summary style="cursor:pointer;font-size:12px;color:var(--muted);">Show raw JSON</summary><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;">${syntaxHighlight(JSON.stringify(d, null, 2))}</pre>`;
+      bodyEl.appendChild(details);
+    } else {
+      bodyEl.innerHTML = syntaxHighlight(JSON.stringify(d, null, 2));
+    }
   } else {
     r.text().then(t => { bodyEl.innerHTML = `<span style="color:var(--red)">${escHtml(t)}</span>`; });
   }

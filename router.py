@@ -33,7 +33,7 @@ from pathlib import Path
 import aiohttp
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from src.comfyui import (
     ComfyUIClient,
@@ -353,24 +353,33 @@ def create_app(config: RouterConfig) -> FastAPI:
         html_path = Path(__file__).parent / "frontend.html"
         return HTMLResponse(content=html_path.read_text())
 
-    @app.get("/static/{file_path:path}")
-    async def static_file(file_path: str):
-        """Serve generated files (images, audio) from ComfyUI output directories."""
+    _MIME_MAP = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".webp": "image/webp", ".gif": "image/gif", ".wav": "audio/wav",
+        ".mp3": "audio/mpeg", ".mp4": "video/mp4",
+    }
+
+    @app.get("/v1/image-data/{file_path:path}")
+    async def image_data(file_path: str):
+        """Return a generated image/audio file as base64 JSON for inline display."""
+        import base64 as b64
         import urllib.parse
+
+        def _serve(path: Path) -> JSONResponse:
+            data = b64.b64encode(path.read_bytes()).decode()
+            ct = _MIME_MAP.get(path.suffix.lower(), "application/octet-stream")
+            return JSONResponse(content={"b64_json": data, "content_type": ct})
+
         decoded = urllib.parse.unquote(file_path)
-        # Search all configured ComfyUI output dirs for the file
-        for output_dir in config.comfyui_output_dirs.values():
-            candidate = Path(output_dir) / decoded
-            if candidate.is_file():
-                return FileResponse(str(candidate))
-            # Also try without decoding (in case path was already clean)
-            candidate2 = Path(output_dir) / file_path
-            if candidate2.is_file():
-                return FileResponse(str(candidate2))
-        # Try as absolute path
+        # Try as absolute path first
         abs_path = Path(decoded)
         if abs_path.is_file():
-            return FileResponse(str(abs_path))
+            return _serve(abs_path)
+        # Search configured ComfyUI output dirs
+        for output_dir in config.comfyui_output_dirs.values():
+            for candidate in (Path(output_dir) / decoded, Path(output_dir) / file_path):
+                if candidate.is_file():
+                    return _serve(candidate)
         return error(404, f"File not found: {decoded}")
 
     @app.get("/v1/models")
