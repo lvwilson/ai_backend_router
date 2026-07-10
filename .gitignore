@@ -50,3 +50,6 @@ demo/output/*.flac
 demo/output/*.ogg
 demo/output/*.m4a
 demo/output/*.aac
+# Runtime logs
+nohup.out
+

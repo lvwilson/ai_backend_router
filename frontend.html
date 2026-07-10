@@ -477,7 +477,7 @@ function buildBody(ep) {
 
 async function loadImageData(base, path) {
   try {
-    const r = await fetch(`${base}/v1/image-data/${encodeURIComponent(path)}`);
+    const r = await fetch(`${base}/v1/data/${encodeURIComponent(path)}`);
     if (r.ok) {
       const d = await r.json();
       return d.b64_json ? `data:${d.content_type};base64,${d.b64_json}` : null;
