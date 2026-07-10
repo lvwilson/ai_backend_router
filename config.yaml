@@ -3,7 +3,7 @@
 # real install at ~/stable_diffusion/ComfyUI serving the Krea2 workflow.
 
 router:
-  host: "127.0.0.1"
+  host: "0.0.0.0"
   port: 8000
   total_vram: 48
 

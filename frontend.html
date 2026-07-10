@@ -101,7 +101,7 @@
   <h1>🔀 <span>Router</span> Console</h1>
   <div class="url-bar">
     <label>Base URL</label>
-    <input type="text" id="baseUrl" value="http://127.0.0.1:8000" />
+    <input type="text" id="baseUrl" value="" placeholder="Leave empty to use same origin" />
   </div>
   <div class="status-dot" id="statusDot" title="Offline"></div>
 </div>
@@ -336,7 +336,8 @@ function populateSelects(ep) {
 
 // ── Fetch models ──────────────────────────────────────────────────────
 async function fetchModels() {
-  const base = document.getElementById("baseUrl").value.replace(/\/+$/, "");
+  const baseInput = document.getElementById("baseUrl").value.trim();
+  const base = baseInput ? baseInput.replace(/\/+$/, "") : "";
   try {
     const r = await fetch(`${base}/v1/models`);
     if (!r.ok) return false;
@@ -368,7 +369,8 @@ async function fetchModels() {
 async function sendRequest() {
   if (!activeEndpoint) return;
   const ep = activeEndpoint;
-  const base = document.getElementById("baseUrl").value.replace(/\/+$/, "");
+  const baseInput = document.getElementById("baseUrl").value.trim();
+  const base = baseInput ? baseInput.replace(/\/+$/, "") : "";
   const btn = document.getElementById("sendBtn");
   const timer = document.getElementById("timer");
   const respArea = document.getElementById("respArea");
@@ -390,7 +392,7 @@ async function sendRequest() {
     if (ep.method === "GET") {
       const r = await fetch(`${base}${ep.path}`);
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-      showResponse(r, elapsed, respStatus, respMeta, respBody);
+      showResponse(r, elapsed, respStatus, respMeta, respBody, base);
     } else if (ep.id === "stt") {
       // Multipart form-data for STT
       const model = document.getElementById("f_model").value;
@@ -401,7 +403,7 @@ async function sendRequest() {
       fd.append("model", model);
       const r = await fetch(`${base}${ep.path}`, { method: "POST", body: fd });
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-      showResponse(r, elapsed, respStatus, respMeta, respBody);
+      showResponse(r, elapsed, respStatus, respMeta, respBody, base);
     } else if (ep.id === "tts") {
       const model = document.getElementById("f_model").value;
       const input = document.getElementById("f_input").value;
@@ -441,7 +443,7 @@ async function sendRequest() {
       }
 
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-      showResponse(r, elapsed, respStatus, respMeta, respBody);
+      showResponse(r, elapsed, respStatus, respMeta, respBody, base);
     }
   } catch (e) {
     const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
@@ -473,21 +475,23 @@ function buildBody(ep) {
   return body;
 }
 
-function showResponse(r, elapsed, statusEl, metaEl, bodyEl) {
+function showResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
   statusEl.textContent = `${r.status} ${r.statusText}`;
   statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
   metaEl.textContent = `${elapsed}s  |  ${r.headers.get("content-type") || "unknown"}`;
   const ct = r.headers.get("content-type") || "";
   if (ct.includes("json")) {
     r.json().then(d => {
-      // Check if this is an image generation response with paths
-      if (Array.isArray(d.data) && d.data.length > 0 && d.data[0].path) {
+      // Check if this is an image generation response with paths or b64_json
+      if (Array.isArray(d.data) && d.data.length > 0 && (d.data[0].path || d.data[0].b64_json)) {
         let imgHtml = "";
         for (const item of d.data) {
-          if (item.path) {
-            // Convert local path to a file:// link and also try to display inline
+          if (item.b64_json) {
+            imgHtml += `<div style="margin-top:12px;"><img src="data:image/png;base64,${item.b64_json}" style="max-width:100%;border-radius:var(--radius);"></div>`;
+          } else if (item.path) {
+            const proxyUrl = `${base}/static/${encodeURIComponent(item.path)}`;
             const fileUrl = "file://" + item.path;
-            imgHtml += `<div style="margin-top:12px;"><img src="${fileUrl}" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="max-width:100%;border-radius:var(--radius);"><a href="${fileUrl}" style="color:var(--accent);font-size:12px;">${escHtml(item.path)}</a></div>`;
+            imgHtml += `<div style="margin-top:12px;"><img src="${proxyUrl}" onerror="this.src='${fileUrl}'" style="max-width:100%;border-radius:var(--radius);"><br><a href="${proxyUrl}" style="color:var(--accent);font-size:12px;">${escHtml(item.path)}</a></div>`;
           }
         }
         bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} image(s) generated</div>${imgHtml}<details style="margin-top:12px;"><summary style="cursor:pointer;font-size:12px;color:var(--muted);">Show raw JSON</summary><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;">${syntaxHighlight(JSON.stringify(d, null, 2))}</pre></details>`;
@@ -608,7 +612,8 @@ function syntaxHighlight(json) {
 
 // ── Periodic health check ─────────────────────────────────────────────
 async function healthCheck() {
-  const base = document.getElementById("baseUrl").value.replace(/\/+$/, "");
+  const baseInput = document.getElementById("baseUrl").value.trim();
+  const base = baseInput ? baseInput.replace(/\/+$/, "") : "";
   const dot = document.getElementById("statusDot");
   try {
     const r = await fetch(`${base}/status`, { signal: AbortSignal.timeout(3000) });

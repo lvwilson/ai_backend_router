@@ -33,7 +33,7 @@ from pathlib import Path
 import aiohttp
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 from src.comfyui import (
     ComfyUIClient,
@@ -346,6 +346,32 @@ def create_app(config: RouterConfig) -> FastAPI:
         )
 
     # ── Ops routes ───────────────────────────────────────────────────────
+
+    @app.get("/")
+    async def frontend():
+        """Serve the interactive test console frontend."""
+        html_path = Path(__file__).parent / "frontend.html"
+        return HTMLResponse(content=html_path.read_text())
+
+    @app.get("/static/{file_path:path}")
+    async def static_file(file_path: str):
+        """Serve generated files (images, audio) from ComfyUI output directories."""
+        import urllib.parse
+        decoded = urllib.parse.unquote(file_path)
+        # Search all configured ComfyUI output dirs for the file
+        for output_dir in config.comfyui_output_dirs.values():
+            candidate = Path(output_dir) / decoded
+            if candidate.is_file():
+                return FileResponse(str(candidate))
+            # Also try without decoding (in case path was already clean)
+            candidate2 = Path(output_dir) / file_path
+            if candidate2.is_file():
+                return FileResponse(str(candidate2))
+        # Try as absolute path
+        abs_path = Path(decoded)
+        if abs_path.is_file():
+            return FileResponse(str(abs_path))
+        return error(404, f"File not found: {decoded}")
 
     @app.get("/v1/models")
     async def models():
