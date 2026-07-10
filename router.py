@@ -371,13 +371,17 @@ def create_app(config: RouterConfig) -> FastAPI:
             return JSONResponse(content={"b64_json": data, "content_type": ct})
 
         decoded = urllib.parse.unquote(file_path)
+        logger.debug("image_data: file_path=%r, decoded=%r", file_path, decoded)
+        logger.debug("image_data: comfyui_output_dirs=%s", list(config.comfyui_output_dirs.values()))
         # Try as absolute path first
         abs_path = Path(decoded)
+        logger.debug("image_data: abs_path=%s, exists=%s", abs_path, abs_path.is_file())
         if abs_path.is_file():
             return _serve(abs_path)
         # Search configured ComfyUI output dirs
         for output_dir in config.comfyui_output_dirs.values():
             for candidate in (Path(output_dir) / decoded, Path(output_dir) / file_path):
+                logger.debug("image_data: candidate=%s, exists=%s", candidate, candidate.is_file())
                 if candidate.is_file():
                     return _serve(candidate)
         return error(404, f"File not found: {decoded}")
