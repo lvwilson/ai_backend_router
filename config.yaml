@@ -176,6 +176,27 @@ backends:
     ram_usage: 6.0
     health_timeout: 30
 
+  kokoro-82m-f16:
+    type: crispasr
+    binary: ~/CrispASR/build/bin/crispasr
+    backend: kokoro
+    model: ~/models/tts/kokoro-82m-f16.gguf
+    voice_dir: ~/models/tts/kokoro-voices
+    port: 9006
+    vram_usage: 0.2
+    health_timeout: 15
+
+  kokoro-82m-f16-cpu:
+    type: crispasr
+    binary: ~/CrispASR/build/bin/crispasr
+    backend: kokoro
+    model: ~/models/tts/kokoro-82m-f16.gguf
+    voice_dir: ~/models/tts/kokoro-voices
+    port: 9007
+    cpu: true
+    ram_usage: 0.2
+    health_timeout: 15
+
   gemma-4-12b-it:
     type: llama
     binary: llama-server
