@@ -4,6 +4,7 @@ router.py — Smart LLM router: unified OpenAI-style API over managed backends.
 Routes:
   POST /v1/chat/completions      → llama backend (by `model`)   [passthrough]
   POST /v1/messages              → llama backend (by `model`)   [passthrough, Anthropic]
+  POST /v1/embeddings            → llama backend (by `model`)   [passthrough, embedding-only]
   POST /v1/audio/transcriptions  → CrispASR                     [passthrough]
   POST /v1/audio/speech          → CrispASR                     [passthrough]
   POST /v1/audio/speech-to-speech→ CrispASR                     [passthrough]
@@ -155,6 +156,16 @@ def create_app(config: RouterConfig) -> FastAPI:
             backend = config.resolve_llama(model)
         except KeyError as exc:
             return error(400, str(exc))
+        return await proxy(request, backend, body)
+
+    # ── Embedding routes (passthrough, routed by model) ──────────────────
+
+    @app.post("/v1/embeddings")
+    async def embeddings(request: Request):
+        if not config.embedding_backends:
+            return error(400, "No embedding backends configured")
+        body, model = await body_model(request)
+        backend = config.resolve_embedding(model)
         return await proxy(request, backend, body)
 
     # ── Audio routes (passthrough, routed by model) ──────────────────────
@@ -391,6 +402,7 @@ def create_app(config: RouterConfig) -> FastAPI:
     async def models():
         data = [{"id": n, "object": "model", "owned_by": "llama"} for n in config.llama_backends]
         data += [{"id": n, "object": "model", "owned_by": "crispasr"} for n in config.audio_backends]
+        data += [{"id": n, "object": "model", "owned_by": "llama", "type": "embedding"} for n in config.embedding_backends]
         data += [{"id": n, "object": "model", "owned_by": "comfyui"} for n in config.image_models]
         data += [{"id": n, "object": "model", "owned_by": "comfyui", "type": "music"} for n in config.music_models]
         return {"object": "list", "data": data}

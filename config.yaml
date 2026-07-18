@@ -225,6 +225,23 @@ backends:
       - "--image-min-tokens"
       - "256"
 
+  qwen3-embedding-8b:
+    type: llama
+    binary: llama-server
+    model: ~/models/llm/Qwen3-Embedding-8B-f16.gguf
+    port: 9008
+    embedding: true
+    context_size: 8192
+    gpu_layers: 99
+    vram_usage: 10
+    retries: 1
+    health_timeout: 60
+    extra_args:
+      - "--batch-size"
+      - "2048"
+      - "--ubatch-size"
+      - "512"
+
   image:
     type: comfyui
     venv: ~/stable_diffusion/ComfyUI/venv/bin/python

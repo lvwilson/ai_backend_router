@@ -65,6 +65,7 @@ class RouterConfig:
     # Routing maps
     llama_backends: list[str] = field(default_factory=list)     # In config order
     audio_backends: list[str] = field(default_factory=list)     # crispasr backend names (in config order)
+    embedding_backends: list[str] = field(default_factory=list) # llama backends with --embedding
     image_models: dict[str, ImageModel] = field(default_factory=dict)
     music_models: dict[str, MusicModel] = field(default_factory=dict)
     comfyui_output_dirs: dict[str, str] = field(default_factory=dict)  # backend → output dir
@@ -116,9 +117,24 @@ class RouterConfig:
             raise KeyError("No music models configured")
         return next(iter(self.music_models.values()))  # Default: first configured
 
+    def resolve_embedding(self, model: str | None) -> str:
+        """Map a request's `model` field to an embedding backend name (case-insensitive)."""
+        if model is not None:
+            model_lower = model.lower()
+            for backend in self.embedding_backends:
+                if backend.lower() == model_lower:
+                    return backend
+        if not self.embedding_backends:
+            raise KeyError("No embedding backends configured")
+        if model is not None:
+            raise KeyError(f"Unknown embedding model '{model}' — available: {', '.join(self.embedding_backends)}")
+        return self.embedding_backends[0]  # Default when model field is omitted
+
 
 def _llama_service(name: str, spec: dict, cache_dir: str | None = None) -> ServiceConfig:
     args = ["-m", _p(spec["model"]), "--port", str(spec["port"])]
+    if spec.get("embedding"):
+        args += ["--embedding"]
     if "context_size" in spec:
         args += ["-c", str(spec["context_size"])]
     if "gpu_layers" in spec:
@@ -235,7 +251,11 @@ def load_config(path: str | Path) -> RouterConfig:
         cfg.backend_ports[name] = spec["port"]
 
         if btype == "llama":
-            cfg.llama_backends.append(name)
+            # Embedding-only backends are registered separately from chat backends.
+            if spec.get("embedding"):
+                cfg.embedding_backends.append(name)
+            else:
+                cfg.llama_backends.append(name)
         elif btype == "crispasr":
             cfg.audio_backends.append(name)
         elif btype == "comfyui":
