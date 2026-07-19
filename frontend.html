@@ -175,15 +175,29 @@ const ENDPOINTS = [
       },
       {
         id: "tts", method: "POST", path: "/v1/audio/speech",
-        desc: "Text-to-speech via CrispASR",
+        desc: "Text-to-speech via CrispASR (Kokoro / Qwen-Talker)",
         fields: [
           { name: "model", type: "select", label: "Model", options: "tts", default: "qwen-talker-1.7b-customvoice" },
           { name: "input", type: "textarea", label: "Text to synthesize", default: "Hello, this is a test of the text-to-speech system." },
+          { name: "voice", type: "text", label: "Voice (optional, for Kokoro)", default: "" },
         ]
       },
       {
         id: "voices", method: "GET", path: "/v1/voices",
         desc: "List available voices from TTS backend" },
+    ]
+  },
+  {
+    section: "Embeddings",
+    items: [
+      {
+        id: "embeddings", method: "POST", path: "/v1/embeddings",
+        desc: "Generate embeddings via llama.cpp embedding backend",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "embedding", default: "qwen3-embedding-8b" },
+          { name: "input", type: "textarea", label: "Input text (string or JSON array)", default: '"The quick brown fox jumps over the lazy dog."' },
+        ]
+      },
     ]
   },
   {
@@ -218,6 +232,9 @@ const ENDPOINTS = [
           { name: "duration", type: "number", label: "Duration (seconds)", default: 30 },
           { name: "bpm", type: "number", label: "BPM", default: 120 },
           { name: "seed", type: "number", label: "Seed (0=random)", default: 0 },
+          { name: "timesignature", type: "text", label: "Time Signature", default: "4" },
+          { name: "language", type: "text", label: "Language", default: "en" },
+          { name: "keyscale", type: "text", label: "Musical Key", default: "E minor" },
         ]
       },
     ]
@@ -253,7 +270,7 @@ const ENDPOINTS = [
 
 // ── State ─────────────────────────────────────────────────────────────
 let activeEndpoint = null;
-let modelCache = { llama: [], stt: [], tts: [], image: [], music: [] };
+let modelCache = { llama: [], stt: [], tts: [], image: [], music: [], embedding: [] };
 
 // ── Build sidebar ─────────────────────────────────────────────────────
 function buildSidebar() {
@@ -347,8 +364,12 @@ async function fetchModels() {
     modelCache.tts = [];
     modelCache.image = [];
     modelCache.music = [];
+    modelCache.embedding = [];
     for (const m of data.data) {
-      if (m.owned_by === "llama") modelCache.llama.push(m.id);
+      if (m.owned_by === "llama") {
+        if (m.type === "embedding") modelCache.embedding.push(m.id);
+        else modelCache.llama.push(m.id);
+      }
       else if (m.owned_by === "crispasr") {
         if (m.id.includes("asr") || m.id.includes("transcription")) modelCache.stt.push(m.id);
         else modelCache.tts.push(m.id);
@@ -407,10 +428,13 @@ async function sendRequest() {
     } else if (ep.id === "tts") {
       const model = document.getElementById("f_model").value;
       const input = document.getElementById("f_input").value;
+      const voice = document.getElementById("f_voice")?.value || "";
+      const ttsBody = { model, input };
+      if (voice) ttsBody.voice = voice;
       const r = await fetch(`${base}${ep.path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model, input }),
+        body: JSON.stringify(ttsBody),
       });
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
       // TTS returns audio blob
@@ -425,6 +449,19 @@ async function sendRequest() {
       });
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
       showMusicResponse(r, elapsed, respStatus, respMeta, respBody, base);
+    } else if (ep.id === "embeddings") {
+      // Embeddings — JSON POST, input field is raw JSON (string or array)
+      const model = document.getElementById("f_model").value;
+      const inputRaw = document.getElementById("f_input").value;
+      let input;
+      try { input = JSON.parse(inputRaw); } catch { input = inputRaw; }
+      const r = await fetch(`${base}${ep.path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, input }),
+      });
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showResponse(r, elapsed, respStatus, respMeta, respBody, base);
     } else {
       // JSON POST — build body from fields
       const body = buildBody(ep);
