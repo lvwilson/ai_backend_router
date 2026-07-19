@@ -77,7 +77,10 @@ def inject_parameters(
         inputs = node.get("inputs", {})
 
         if ctype in SAMPLER_TYPES:
-            inputs["seed"] = seed if seed is not None else random.randint(0, 2**48)
+            # Negative seeds mean "random" (ComfyUI rejects them); 0 is a
+            # valid literal seed here — unlike the music workflow, where 0
+            # is the documented "random" sentinel.
+            inputs["seed"] = seed if seed is not None and seed >= 0 else random.randint(0, 2**48)
             if steps is not None:
                 inputs["steps"] = steps
             if cfg is not None:
@@ -145,7 +148,8 @@ def inject_music_parameters(
       • EmptyAceStep1.5LatentAudio (98) → seconds (duration)
     """
     wf = copy.deepcopy(workflow)
-    seed_value = seed if seed is not None and seed != 0 else random.randint(0, 2**48)
+    # Music workflow convention: 0 (or a negative value) means "random".
+    seed_value = seed if seed is not None and seed > 0 else random.randint(0, 2**48)
 
     for node in wf.values():
         ctype = node.get("class_type", "")

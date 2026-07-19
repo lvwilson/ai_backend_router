@@ -463,10 +463,10 @@ async function sendRequest() {
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
       showResponse(r, elapsed, respStatus, respMeta, respBody, base);
     } else {
-      // JSON POST — build body from fields
+      // JSON POST — build body from fields. `stream` stays in the body so
+      // the backend actually streams; streamField only selects the renderer.
       const body = buildBody(ep);
       const streamField = body.stream !== undefined ? body.stream : false;
-      delete body.stream; // stream is handled separately
 
       const r = await fetch(`${base}${ep.path}`, {
         method: "POST",

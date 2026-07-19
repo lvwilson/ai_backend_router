@@ -45,16 +45,18 @@ async def run_router(config_path: str, stop: asyncio.Future) -> int:
     )
     logger.info("Router PID=%d", proc.pid)
 
-    # Forward stderr lines in real-time (router logs to stderr + file)
-    async def tail_stderr():
-        if proc.stderr:
-            async for line in proc.stderr:
+    # Forward stderr lines in real-time (router logs to stderr + file).
+    # stdout must also be drained — an unread pipe eventually fills its
+    # ~64 KB OS buffer and blocks the router process on write().
+    async def tail_stream(stream, label):
+        if stream:
+            async for line in stream:
                 text = line.decode(errors="replace").rstrip()
                 if text:
-                    logger.debug("router: %s", text)
+                    logger.debug("router %s: %s", label, text)
 
     try:
-        await asyncio.gather(proc.wait(), tail_stderr())
+        await asyncio.gather(proc.wait(), tail_stream(proc.stderr, "stderr"), tail_stream(proc.stdout, "stdout"))
     except asyncio.CancelledError:
         # Shutdown requested while waiting — terminate the router process group.
         logger.info("Shutting down router process group (PGID=%d)...", proc.pid)
@@ -77,6 +79,27 @@ async def run_router(config_path: str, stop: asyncio.Future) -> int:
     return proc.returncode or 0
 
 
+async def wait_config_change(config: Path, mtime: float, stop: asyncio.Future) -> float | None:
+    """
+    Poll the config file until its mtime changes (returns the new mtime)
+    or shutdown is requested (returns None).
+    """
+    while not stop.done():
+        try:
+            new_mtime = config.stat().st_mtime
+            if new_mtime != mtime:
+                return new_mtime
+        except OSError:
+            pass
+        try:
+            await asyncio.wait_for(asyncio.shield(asyncio.sleep(CONFIG_POLL_INTERVAL)), timeout=CONFIG_POLL_INTERVAL + 1.0)
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            return None
+    return None
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -91,7 +114,6 @@ async def main() -> None:
 
     # Track config mtime for change detection.
     config_mtime = config.stat().st_mtime
-    restart_requested = False
 
     loop = asyncio.get_event_loop()
     stop = loop.create_future()
@@ -111,36 +133,53 @@ async def main() -> None:
     logger.info("Watchdog started — watching %s", config_path)
 
     while not stop.done():
-        # Check for config changes
-        try:
-            new_mtime = config.stat().st_mtime
-            if new_mtime != config_mtime:
-                logger.info("Config file changed — will restart router on next cycle")
-                config_mtime = new_mtime
-                restart_requested = True
-        except OSError:
-            pass
-
-        # Run the router in a cancellable task.
+        # Run the router and a config-change watcher concurrently; whichever
+        # finishes first ends the cycle.
         current_task = asyncio.ensure_future(run_router(config_path, stop))
+        watcher = asyncio.ensure_future(wait_config_change(config, config_mtime, stop))
         try:
-            exit_code = await current_task
+            done, pending = await asyncio.wait(
+                {current_task, watcher}, return_when=asyncio.FIRST_COMPLETED
+            )
         except asyncio.CancelledError:
-            # Shutdown requested — run_router already terminated the process group.
+            watcher.cancel()
+            current_task.cancel()
+            try:
+                await current_task
+            except asyncio.CancelledError:
+                pass
             break
 
+        if watcher in done and not watcher.cancelled():
+            new_mtime = watcher.result()
+            if new_mtime is not None:
+                logger.info("Config file changed — restarting router")
+                config_mtime = new_mtime
+                # Terminate the running router; run_router's CancelledError
+                # handler SIGTERMs the process group.
+                current_task.cancel()
+                try:
+                    await current_task
+                except asyncio.CancelledError:
+                    pass
+                current_task = None
+                continue  # Relaunch immediately with the new config
+        else:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
+
         current_task = None
-        restart_requested = False  # Config was loaded fresh
 
         if stop.done():
             break
 
-        # Decide whether to restart.
-        # Exit code 0 from SIGTERM is intentional shutdown — but since we're
-        # the watchdog, any exit triggers a restart (unless we're stopping).
+        # Router exited on its own — restart after a brief delay.
         logger.info("Restarting router in %.1fs...", SHUTDOWN_DELAY)
         try:
-            await asyncio.wait_for(asyncio.sleep(SHUTDOWN_DELAY), timeout=None)
+            await asyncio.sleep(SHUTDOWN_DELAY)
         except asyncio.CancelledError:
             break
 

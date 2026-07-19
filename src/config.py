@@ -65,6 +65,7 @@ class RouterConfig:
     # Routing maps
     llama_backends: list[str] = field(default_factory=list)     # In config order
     audio_backends: list[str] = field(default_factory=list)     # crispasr backend names (in config order)
+    tts_backends: list[str] = field(default_factory=list)       # crispasr backends that support /v1/voices
     embedding_backends: list[str] = field(default_factory=list) # llama backends with --embedding
     image_models: dict[str, ImageModel] = field(default_factory=dict)
     music_models: dict[str, MusicModel] = field(default_factory=dict)
@@ -258,6 +259,11 @@ def load_config(path: str | Path) -> RouterConfig:
                 cfg.llama_backends.append(name)
         elif btype == "crispasr":
             cfg.audio_backends.append(name)
+            # TTS-capable backends expose /v1/voices — detect from the CrispASR
+            # backend name (e.g. "qwen3-tts-1.7b-customvoice", "kokoro").
+            asr_backend = str(spec.get("backend", "")).lower()
+            if "tts" in asr_backend or "kokoro" in asr_backend or "talker" in name.lower():
+                cfg.tts_backends.append(name)
         elif btype == "comfyui":
             if "output_dir" in spec:
                 cfg.comfyui_output_dirs[name] = _p(spec["output_dir"])

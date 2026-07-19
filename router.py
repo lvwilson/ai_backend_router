@@ -165,7 +165,10 @@ def create_app(config: RouterConfig) -> FastAPI:
         if not config.embedding_backends:
             return error(400, "No embedding backends configured")
         body, model = await body_model(request)
-        backend = config.resolve_embedding(model)
+        try:
+            backend = config.resolve_embedding(model)
+        except KeyError as exc:
+            return error(400, str(exc))
         return await proxy(request, backend, body)
 
     # ── Audio routes (passthrough, routed by model) ──────────────────────
@@ -206,11 +209,10 @@ def create_app(config: RouterConfig) -> FastAPI:
     async def voices(request: Request):
         if not config.audio_backends:
             return error(400, "No audio backends configured")
-        # Route to the first TTS-capable backend (customvoice or voicedesign).
+        # Route to the first TTS-capable backend (Qwen-Talker, Kokoro, ...).
         # STT-only backends (qwen3-asr-*) don't support /v1/voices.
-        for name in config.audio_backends:
-            if "talker" in name.lower() or "tts" in name.lower():
-                return await proxy(request, name)
+        if config.tts_backends:
+            return await proxy(request, config.tts_backends[0])
         # Fallback: try the first backend
         return await proxy(request, config.audio_backends[0])
 

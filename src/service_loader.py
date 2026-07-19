@@ -36,6 +36,7 @@ import os
 import signal
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Coroutine
 
 from .health_checker import HealthChecker
@@ -248,12 +249,56 @@ class ServiceLoader:
             interval=config.health_interval,
         )
 
+        # Background tasks draining the child's stdout/stderr pipes.
+        # Without these the OS pipe buffer (~64 KB) fills and the backend
+        # blocks on write() — a silent, total hang of the service.
+        self._drain_tasks: list[asyncio.Task] = []
+
         # VRAM tracking — authoritative per-process measurement.
         # Set after successful start via measure_vram_from_pid().
         self._actual_vram_gb: float | None = None
         self._vram_drift_warned_at: float | None = None
 
     # ── Internal helpers ─────────────────────────────────────────────────
+
+    async def _drain_stream(self, stream: asyncio.StreamReader | None, label: str) -> None:
+        """
+        Continuously drain a child process pipe so the OS buffer never fills.
+
+        Without this, a chatty backend (llama-server, ComfyUI) blocks on
+        write() after ~64 KB of output and the service silently hangs.
+        Lines are logged at DEBUG level so diagnostics remain available.
+        """
+        if stream is None:
+            return
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    return  # EOF — process closed the stream
+                text = line.decode(errors="replace").rstrip()
+                if text:
+                    logger.debug("[%s] %s: %s", self.config.name, label, text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("[%s] %s drain ended: %s", self.config.name, label, exc)
+
+    def _start_pipe_drains(self) -> None:
+        """Launch background drain tasks for the child's stdout/stderr."""
+        self._stop_pipe_drains()
+        if self._process is None:
+            return
+        self._drain_tasks = [
+            asyncio.create_task(self._drain_stream(self._process.stdout, "stdout")),
+            asyncio.create_task(self._drain_stream(self._process.stderr, "stderr")),
+        ]
+
+    def _stop_pipe_drains(self) -> None:
+        """Cancel any running pipe drain tasks."""
+        for task in self._drain_tasks:
+            task.cancel()
+        self._drain_tasks = []
 
     async def _emit(self, name: str, payload: dict[str, Any] | None = None) -> None:
         """Emit a lifecycle event if a callback is registered."""
@@ -391,7 +436,7 @@ class ServiceLoader:
                         "config conflict or stale process. Our binary: '%s'",
                         self.config.name, port, other_name, other_pid, our_binary,
                     )
-        except Exception as exc:
+        except OSError as exc:
             logger.debug("[%s] Port conflict check skipped: %s", self.config.name, exc)
 
     async def start(self) -> bool:
@@ -454,6 +499,9 @@ class ServiceLoader:
             self._started_at = time.monotonic()
             logger.info("[%s] Process started, PID=%d", self.config.name, self._process.pid)
 
+            # Drain stdout/stderr in the background so the pipes never fill.
+            self._start_pipe_drains()
+
             # Wait for health
             healthy = await self.health_checker.wait_for_healthy(self._process)
 
@@ -467,12 +515,12 @@ class ServiceLoader:
                 return True
             else:
                 self._state = ServiceState.DEAD
+                # Stop the drain tasks so we can read stderr directly below.
+                self._stop_pipe_drains()
                 # Capture stderr before cleanup kills the process
                 stderr_tail = ""
-                if self._process is not None:
+                if self._process is not None and self._process.stderr is not None:
                     try:
-                        stderr_data = self._process.stderr.readline()
-                        # Read remaining stderr
                         remaining = await asyncio.wait_for(
                             self._process.stderr.read(), timeout=2.0
                         )
@@ -707,6 +755,7 @@ class ServiceLoader:
         silent VRAM leaks. This is critical: a process that fails its health
         check may still be alive and holding GPU memory.
         """
+        self._stop_pipe_drains()
         if self._process is not None:
             proc = self._process
             if proc.returncode is None:

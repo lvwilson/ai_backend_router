@@ -7,6 +7,8 @@ router:
   port: 8000
   total_vram: 48          # GB — total GPU VRAM
   vram_reserve: 2         # GB — keep free for OS / compositor
+  sysram_reserve: 16      # GB — keep free for OS when budgeting CPU backends
+  cache_dir: ~/.cache/llama-router-cache   # llama.cpp slot (prompt) cache dir
 
 backends:
   # ── llama.cpp — passthrough (OpenAI /v1/chat/completions + Anthropic /v1/messages)
@@ -32,7 +34,23 @@ backends:
       - "--top-k"
       - "20"
 
+  # ── llama.cpp embedding backend — passthrough (POST /v1/embeddings)
+  # `embedding: true` adds --embedding to llama-server and registers the
+  # backend for embedding routing (separate from chat LLMs).
+  qwen3-embedding-8b:
+    type: llama
+    binary: llama-server
+    model: ~/models/llm/Qwen3-Embedding-8B-f16.gguf
+    port: 9008
+    embedding: true
+    context_size: 8192
+    gpu_layers: 99
+    vram_usage: 10
+    retries: 1
+
   # ── CrispASR — passthrough (OpenAI /v1/audio/*)
+  # Backends whose `backend` name contains "tts" or "kokoro" are treated as
+  # TTS-capable and serve GET /v1/voices; others are STT-only.
   asr:
     type: crispasr
     binary: crispasr
@@ -41,6 +59,16 @@ backends:
     port: 8081
     vram_usage: 0.5
     retries: 1
+
+  # ── CrispASR TTS example (Kokoro)
+  kokoro-82m-f16:
+    type: crispasr
+    binary: ~/CrispASR/build/bin/crispasr
+    backend: kokoro
+    model: ~/models/tts/kokoro-82m-f16.gguf
+    voice_dir: ~/models/tts/kokoro-voices
+    port: 9006
+    vram_usage: 0.2
 
   # ── ComfyUI — translated (/v1/images/generations → workflow injection)
   # `model` field selects a workflow; its VRAM is budgeted per request since
@@ -58,3 +86,8 @@ backends:
       krea2:
         workflow: ~/projectnotes/workflows/krea2_basic.json
         vram_usage: 14    # GB for the krea2 turbo checkpoint + VAE + CLIP
+    # Music models served via POST /v1/music/generations (Ace Step workflow).
+    music_models:
+      ace_step_1.5_xl_turbo:
+        workflow: ~/projectnotes/workflows/audio_ace_step1_5_xl_turbo.json
+        vram_usage: 28

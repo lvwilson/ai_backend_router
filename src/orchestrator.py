@@ -40,11 +40,11 @@ from .service_loader import (
 )
 
 
-async def query_sysram_used_gb() -> float | None:
+async def query_sysram_gb() -> tuple[float, float] | None:
     """
-    Query total system RAM used via /proc/meminfo.
+    Query system RAM via /proc/meminfo in a single read.
 
-    Returns RAM used in GB, or None if unavailable.
+    Returns (total_gb, used_gb), or None if unavailable.
     """
     try:
         text = await asyncio.to_thread(lambda: Path("/proc/meminfo").read_text())
@@ -54,8 +54,11 @@ async def query_sysram_used_gb() -> float | None:
         )}
         total_kb = lines.get("MemTotal", 0)
         available_kb = lines.get("MemAvailable", lines.get("MemFree", 0))
+        if total_kb <= 0:
+            return None
         used_kb = total_kb - available_kb
-        return used_kb / (1024.0 * 1024.0)
+        gib = 1024.0 * 1024.0
+        return total_kb / gib, used_kb / gib
     except Exception:
         return None
 
@@ -96,10 +99,12 @@ class Orchestrator:
         self.total_vram_gb = total_vram_gb
         self.vram_reserve_gb = vram_reserve_gb
         self.sysram_reserve_gb = sysram_reserve_gb
-        self.cache_dir = cache_dir
+        # Expand ~ up front — backends launch without a shell, so an
+        # unexpanded '~' would create a literal '~' directory in the CWD.
+        self.cache_dir = str(Path(cache_dir).expanduser()) if cache_dir else None
         # Ensure cache directory exists
-        if cache_dir:
-            os.makedirs(cache_dir, exist_ok=True)
+        if self.cache_dir:
+            os.makedirs(self.cache_dir, exist_ok=True)
         self.services: dict[str, ServiceLoader] = {
             c.name: ServiceLoader(c, event_callback=event_callback) for c in configs
         }
@@ -135,27 +140,19 @@ class Orchestrator:
         """RAM attributed to a CPU service."""
         return loader.config.expected_ram_gb
 
+    async def _mem_total_gb(self) -> float | None:
+        """Total system RAM in GB, from a single /proc/meminfo read."""
+        res = await query_sysram_gb()
+        return res[0] if res else None
+
     async def available_sysram_gb(self) -> float:
         """System RAM available for CPU backends."""
-        used = await query_sysram_used_gb()
-        if used is None:
-            used = sum(self._tracked_ram(s) for s in self._running())
-        # Total RAM is inferred from /proc/meminfo; reserve is subtracted.
-        total = await query_sysram_used_gb()
-        if total is not None:
-            try:
-                text = await asyncio.to_thread(lambda: Path("/proc/meminfo").read_text())
-                for line in text.splitlines():
-                    if line.startswith("MemTotal"):
-                        total_gb = int(line.split(":")[1].strip().split()[0]) / (1024.0 * 1024.0)
-                        break
-                else:
-                    total_gb = None
-            except Exception:
-                total_gb = None
-            if total_gb is not None:
-                return total_gb - self.sysram_reserve_gb - used
+        res = await query_sysram_gb()
+        if res is not None:
+            total, used = res
+            return total - self.sysram_reserve_gb - used
         # Fallback: tracked bookkeeping with a reasonable total estimate
+        used = sum(self._tracked_ram(s) for s in self._running())
         return 64.0 - self.sysram_reserve_gb - used
 
     async def available_vram_gb(self) -> float:
@@ -280,16 +277,8 @@ class Orchestrator:
 
         # Sanity: can it ever fit?
         if cpu:
-            try:
-                text = await asyncio.to_thread(lambda: Path("/proc/meminfo").read_text())
-                for line in text.splitlines():
-                    if line.startswith("MemTotal"):
-                        budget = int(line.split(":")[1].strip().split()[0]) / (1024.0 * 1024.0) - self.sysram_reserve_gb
-                        break
-                else:
-                    budget = None
-            except Exception:
-                budget = None
+            mem_total = await self._mem_total_gb()
+            budget = mem_total - self.sysram_reserve_gb if mem_total is not None else None
             if budget is not None and needed_gb > budget:
                 raise InsufficientVRAMError(
                     f"Backend needs {needed_gb:.1f} GB sysram but budget is only {budget:.1f} GB"
