@@ -25,6 +25,12 @@ logger = logging.getLogger("watchdog")
 
 SHUTDOWN_DELAY = 1.0       # Seconds between restart attempts
 CONFIG_POLL_INTERVAL = 5.0 # Seconds between config change checks
+# Grace period for the router to shut down before SIGKILL. Must comfortably
+# exceed the router's worst-case graceful shutdown: per-backend slot-cache
+# save (~10s) + stop timeout (~10s), batched concurrently, plus uvicorn's
+# graceful-shutdown window. Too short and the router is SIGKILLed mid-shutdown,
+# leaving orphaned backends holding VRAM.
+ROUTER_SHUTDOWN_TIMEOUT = 30.0
 
 
 async def run_router(config_path: str, stop: asyncio.Future) -> int:
@@ -64,11 +70,15 @@ async def run_router(config_path: str, stop: asyncio.Future) -> int:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except ProcessLookupError:
             pass
-        # Give it a moment to exit gracefully.
+        # Give it time to run its graceful shutdown (stop all backends).
         try:
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
+            await asyncio.wait_for(proc.wait(), timeout=ROUTER_SHUTDOWN_TIMEOUT)
         except asyncio.TimeoutError:
-            logger.info("Router didn't exit in 5s, sending SIGKILL")
+            logger.warning(
+                "Router didn't exit in %.0fs, sending SIGKILL "
+                "(backends self-terminate via PR_SET_PDEATHSIG)",
+                ROUTER_SHUTDOWN_TIMEOUT,
+            )
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except ProcessLookupError:

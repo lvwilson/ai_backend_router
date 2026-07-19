@@ -23,6 +23,7 @@ Run: python router.py [config.yaml]
 
 from __future__ import annotations
 
+import atexit
 import asyncio
 import json
 import logging
@@ -58,6 +59,28 @@ HOP_HEADERS = {
 }
 
 
+def _install_orphan_sweeper(orch: "Orchestrator") -> None:
+    """
+    Register a last-resort atexit hook that SIGKILLs any backend process
+    groups still alive when the router interpreter exits.
+
+    This runs after the async lifespan shutdown (so gracefully-stopped
+    backends are already gone and unaffected), and covers the paths where
+    graceful shutdown never ran — interpreter error, uvicorn force-exit —
+    that would otherwise orphan GPU-holding backends.
+    """
+    def sweep() -> None:
+        import signal as _signal
+        for loader in orch.services.values():
+            proc = loader._process
+            if proc is not None and proc.returncode is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+    atexit.register(sweep)
+
+
 def create_app(config: RouterConfig) -> FastAPI:
     orch = Orchestrator(
         config.services,
@@ -76,6 +99,7 @@ def create_app(config: RouterConfig) -> FastAPI:
         await app.state.http.close()
         await orch.shutdown()
 
+    _install_orphan_sweeper(orch)
     app = FastAPI(title="Smart LLM Router", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
@@ -463,7 +487,17 @@ def main() -> None:
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     config = load_config(config_path)
     app = create_app(config)
-    uvicorn.run(app, host=config.host, port=config.port, log_level="info")
+    # timeout_graceful_shutdown bounds how long uvicorn waits for in-flight
+    # (e.g. streaming) requests before forcing exit — without it a hung stream
+    # can stall shutdown past the watchdog's patience, and the ensuing SIGKILL
+    # would abort backend cleanup mid-flight.
+    uvicorn.run(
+        app,
+        host=config.host,
+        port=config.port,
+        log_level="info",
+        timeout_graceful_shutdown=10,
+    )
 
 
 def get_app() -> FastAPI:

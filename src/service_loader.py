@@ -46,6 +46,33 @@ EventCallback = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 logger = logging.getLogger(__name__)
 
 
+def _child_preexec() -> None:
+    """
+    Child-side setup, run between fork and exec.
+
+    - setsid: new session/process group so the router can signal the whole
+      backend tree via os.killpg() without touching its own group.
+    - PR_SET_PDEATHSIG(SIGKILL): ask the kernel to SIGKILL this process if
+      its parent (the router) dies for any reason — SIGKILL, OOM, segfault.
+      This is the backstop that prevents orphaned backends from leaking VRAM
+      when the router cannot run its graceful shutdown path.
+    """
+    os.setsid()
+    try:
+        import ctypes
+        PR_SET_PDEATHSIG = 1
+        # The parent may already be dead (race between fork and prctl); if so,
+        # our ppid will differ from the router's and we must exit immediately
+        # rather than run as an orphan.
+        parent_pid = os.getppid()
+        if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+            return  # prctl unavailable — setsid alone still allows group signals
+        if os.getppid() != parent_pid:
+            os._exit(1)
+    except Exception:
+        pass  # Non-Linux or restricted environment — graceful shutdown still applies
+
+
 # ── VRAM helpers ───────────────────────────────────────────────────────────
 
 VRAM_DRIFT_THRESHOLD_GB = 2.0       # Warn if actual differs from expected by >2 GB
@@ -493,7 +520,7 @@ class ServiceLoader:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=self.config.working_dir,
-                preexec_fn=os.setsid,  # Create new process group for clean signal delivery
+                preexec_fn=_child_preexec,  # setsid + die-with-parent backstop
             )
 
             self._started_at = time.monotonic()
