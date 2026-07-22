@@ -391,6 +391,12 @@ def create_app(config: RouterConfig) -> FastAPI:
         html_path = Path(__file__).parent / "frontend.html"
         return HTMLResponse(content=html_path.read_text())
 
+    @app.get("/mobile")
+    async def mobile():
+        """Serve the mobile-friendly frontend."""
+        html_path = Path(__file__).parent / "mobile.html"
+        return HTMLResponse(content=html_path.read_text())
+
     _MIME_MAP = {
         ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".webp": "image/webp", ".gif": "image/gif", ".wav": "audio/wav",

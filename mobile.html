@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Smart Router</title>
+<style>
+  :root {
+    --bg: #08090d;
+    --surface: #13151d;
+    --surface2: #1c1f2e;
+    --border: #262a3a;
+    --text: #e4e6f0;
+    --muted: #6b7094;
+    --accent: #6c8cff;
+    --accent-glow: rgba(108,140,255,0.25);
+    --accent2: #a78bfa;
+    --green: #34d399;
+    --red: #f87171;
+    --yellow: #fbbf24;
+    --radius: 14px;
+    --radius-sm: 10px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, 'SF Pro', 'Inter', 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+  }
+
+  /* ── Top Bar ─────────────────────────────────────────────── */
+  .topbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    height: 56px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px;
+    background: rgba(19,21,29,0.85);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar-left { display: flex; align-items: center; gap: 10px; }
+  .topbar-logo {
+    width: 30px; height: 30px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+  .topbar-title { font-size: 16px; font-weight: 700; }
+  .topbar-title span { color: var(--accent); }
+  .status-pill {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 20px;
+    background: var(--surface2);
+    font-size: 11px; font-weight: 600; color: var(--muted);
+  }
+  .status-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted); transition: background 0.3s;
+  }
+  .status-dot.online { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .status-dot.offline { background: var(--red); }
+
+  /* ── Content ─────────────────────────────────────────────── */
+  .content {
+    position: fixed;
+    top: 56px; bottom: 0; left: 0; right: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 80px;
+  }
+
+  /* ── Category Chips ──────────────────────────────────────── */
+  .chips-bar {
+    position: sticky; top: 0; z-index: 50;
+    padding: 12px 16px 8px;
+    background: rgba(8,9,13,0.9);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    display: flex; gap: 8px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .chips-bar::-webkit-scrollbar { display: none; }
+  .chip {
+    flex-shrink: 0;
+    padding: 7px 14px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  .chip.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    box-shadow: 0 0 12px var(--accent-glow);
+  }
+  .chip:active { transform: scale(0.95); }
+
+  /* ── Endpoint Cards ──────────────────────────────────────── */
+  .cards { padding: 8px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .card:active { border-color: var(--accent); }
+  .card-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px;
+    cursor: pointer;
+  }
+  .card-method {
+    font-size: 10px; font-weight: 800; letter-spacing: 0.5px;
+    padding: 3px 7px; border-radius: 5px;
+    font-family: 'SF Mono', 'JetBrains Mono', monospace;
+    min-width: 36px; text-align: center;
+  }
+  .card-method.get { background: rgba(52,211,153,0.15); color: var(--green); }
+  .card-method.post { background: rgba(167,139,250,0.15); color: var(--accent2); }
+  .card-path {
+    font-family: 'SF Mono', 'JetBrains Mono', monospace;
+    font-size: 13px; font-weight: 600;
+    flex: 1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .card-chevron {
+    color: var(--muted); font-size: 18px; transition: transform 0.25s;
+  }
+  .card.open .card-chevron { transform: rotate(180deg); }
+  .card-desc {
+    font-size: 12px; color: var(--muted);
+    padding: 0 16px 10px;
+  }
+
+  /* ── Card Body (expanded) ────────────────────────────────── */
+  .card-body {
+    display: none;
+    padding: 0 16px 16px;
+    border-top: 1px solid var(--border);
+  }
+  .card.open .card-body { display: block; }
+
+  .field { margin-top: 14px; }
+  .field label {
+    display: block; font-size: 11px; font-weight: 700;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.6px; margin-bottom: 5px;
+  }
+  .field input, .field select, .field textarea {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    font-family: 'SF Mono', 'JetBrains Mono', monospace;
+    transition: border-color 0.2s;
+  }
+  .field textarea { min-height: 80px; resize: vertical; }
+  .field input:focus, .field select:focus, .field textarea:focus {
+    outline: none; border-color: var(--accent);
+  }
+  .field select { cursor: pointer; }
+  .field select option { background: var(--surface); }
+  .field .hint { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .field-row { display: flex; gap: 10px; }
+  .field-row .field { flex: 1; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+  .check input { accent-color: var(--accent); width: 18px; height: 18px; }
+  .field input[type="file"] { padding: 8px; font-size: 13px; }
+
+  .send-row {
+    display: flex; align-items: center; gap: 10px; margin-top: 16px;
+  }
+  .btn-send {
+    flex: 1;
+    padding: 12px;
+    border: none; border-radius: var(--radius-sm);
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #fff;
+    font-size: 14px; font-weight: 700;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+  }
+  .btn-send:active { transform: scale(0.97); }
+  .btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+  .timer { font-size: 12px; color: var(--muted); font-family: monospace; }
+
+  /* ── Response ────────────────────────────────────────────── */
+  .response-area {
+    margin-top: 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  .response-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+  }
+  .response-header .status { font-weight: 700; font-family: monospace; }
+  .response-header .status.s2xx { color: var(--green); }
+  .response-header .status.s4xx { color: var(--yellow); }
+  .response-header .status.s5xx { color: var(--red); }
+  .response-body {
+    padding: 12px;
+    font-family: 'SF Mono', 'JetBrains Mono', monospace;
+    font-size: 12px; line-height: 1.6;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 350px;
+    overflow-y: auto;
+  }
+  .response-body img { max-width: 100%; border-radius: var(--radius-sm); margin-top: 8px; }
+  .response-body audio { width: 100%; margin-top: 8px; }
+
+  /* ── Welcome ─────────────────────────────────────────────── */
+  .welcome {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; height: 60vh; text-align: center;
+    padding: 32px;
+  }
+  .welcome-icon {
+    width: 64px; height: 64px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 18px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 30px; margin-bottom: 20px;
+    box-shadow: 0 8px 32px var(--accent-glow);
+  }
+  .welcome h2 { font-size: 20px; margin-bottom: 8px; }
+  .welcome p { font-size: 14px; color: var(--muted); line-height: 1.5; }
+
+  /* ── URL Bar Modal ───────────────────────────────────────── */
+  .url-modal {
+    display: none;
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(4px);
+    align-items: flex-end;
+    justify-content: center;
+  }
+  .url-modal.show { display: flex; }
+  .url-modal-inner {
+    width: 100%; max-width: 500px;
+    background: var(--surface);
+    border-radius: 20px 20px 0 0;
+    padding: 20px;
+    border-top: 1px solid var(--border);
+  }
+  .url-modal-inner h3 { font-size: 16px; margin-bottom: 12px; }
+  .url-modal-inner input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 12px;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    font-family: monospace;
+  }
+  .url-modal-inner input:focus { outline: none; border-color: var(--accent); }
+  .url-modal-btns { display: flex; gap: 10px; margin-top: 14px; }
+  .url-modal-btns button {
+    flex: 1; padding: 12px; border: none; border-radius: var(--radius-sm);
+    font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .url-modal-btns .btn-cancel { background: var(--surface2); color: var(--text); }
+  .url-modal-btns .btn-save { background: var(--accent); color: #fff; }
+
+  /* ── Scrollbar ───────────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<!-- Top Bar -->
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="topbar-logo">🔀</div>
+    <div class="topbar-title"><span>Router</span></div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <div class="status-pill" onclick="showUrlModal()">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusLabel">checking…</span>
+    </div>
+  </div>
+</div>
+
+<!-- Content -->
+<div class="content" id="content">
+  <div class="chips-bar" id="chipsBar"></div>
+  <div class="cards" id="cards"></div>
+</div>
+
+<!-- URL Modal -->
+<div class="url-modal" id="urlModal" onclick="hideUrlModal(event)">
+  <div class="url-modal-inner" onclick="event.stopPropagation()">
+    <h3>Base URL</h3>
+    <input type="text" id="baseUrlInput" placeholder="Leave empty for same origin" />
+    <div class="url-modal-btns">
+      <button class="btn-cancel" onclick="hideUrlModal()">Cancel</button>
+      <button class="btn-save" onclick="saveBaseUrl()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Endpoint definitions ──────────────────────────────────────────────
+const ENDPOINTS = [
+  {
+    section: "Ops",
+    items: [
+      { id: "status", method: "GET", path: "/status", desc: "Fleet status with VRAM info" },
+      { id: "models", method: "GET", path: "/v1/models", desc: "List all available models" },
+    ]
+  },
+  {
+    section: "Chat",
+    items: [
+      {
+        id: "chat-stream", method: "POST", path: "/v1/chat/completions",
+        desc: "Chat completions (streamed)",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "llama", default: "qwen3.6-27b-instruct" },
+          { name: "messages", type: "textarea", label: "Messages (JSON)", default: JSON.stringify([{"role":"user","content":"Explain quantum computing in one sentence."}], null, 2) },
+          { name: "max_tokens", type: "number", label: "Max Tokens", default: 128 },
+          { name: "stream", type: "checkbox", label: "Stream", default: true },
+        ]
+      },
+      {
+        id: "chat-nostream", method: "POST", path: "/v1/chat/completions",
+        desc: "Chat completions (non-streamed)",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "llama", default: "qwen3.6-27b-instruct" },
+          { name: "messages", type: "textarea", label: "Messages (JSON)", default: JSON.stringify([{"role":"user","content":"What is the capital of France?"}], null, 2) },
+          { name: "max_tokens", type: "number", label: "Max Tokens", default: 64 },
+          { name: "stream", type: "checkbox", label: "Stream", default: false },
+        ]
+      },
+      {
+        id: "messages", method: "POST", path: "/v1/messages",
+        desc: "Anthropic-style messages",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "llama", default: "qwen3.6-27b-instruct" },
+          { name: "messages", type: "textarea", label: "Messages (JSON)", default: JSON.stringify([{"role":"user","content":"Hello, who are you?"}], null, 2) },
+          { name: "max_tokens", type: "number", label: "Max Tokens", default: 128 },
+        ]
+      },
+    ]
+  },
+  {
+    section: "Audio",
+    items: [
+      {
+        id: "stt", method: "POST", path: "/v1/audio/transcriptions",
+        desc: "Speech-to-text",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "stt", default: "qwen3-asr-1.7b" },
+          { name: "file", type: "file", label: "Audio File", accept: "audio/*" },
+        ]
+      },
+      {
+        id: "tts", method: "POST", path: "/v1/audio/speech",
+        desc: "Text-to-speech",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "tts", default: "qwen-talker-1.7b-customvoice" },
+          { name: "input", type: "textarea", label: "Text", default: "Hello, this is a test of the text-to-speech system." },
+          { name: "voice", type: "text", label: "Voice (optional)", default: "" },
+        ]
+      },
+      {
+        id: "voices", method: "GET", path: "/v1/voices", desc: "List available voices" },
+    ]
+  },
+  {
+    section: "Embed",
+    items: [
+      {
+        id: "embeddings", method: "POST", path: "/v1/embeddings",
+        desc: "Generate embeddings",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "embedding", default: "qwen3-embedding-8b" },
+          { name: "input", type: "textarea", label: "Input text", default: '"The quick brown fox jumps over the lazy dog."' },
+        ]
+      },
+    ]
+  },
+  {
+    section: "Image",
+    items: [
+      {
+        id: "image", method: "POST", path: "/v1/images/generations",
+        desc: "Generate images via ComfyUI",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "image", default: "krea2" },
+          { name: "prompt", type: "textarea", label: "Prompt", default: "A serene mountain lake at sunrise, photorealistic, golden hour lighting" },
+          { name: "negative_prompt", type: "text", label: "Negative Prompt", default: "blurry, low quality, distorted" },
+          { name: "size", type: "text", label: "Size", default: "512x512" },
+          { name: "n", type: "number", label: "Count", default: 1 },
+          { name: "steps", type: "number", label: "Steps (optional)", default: "" },
+          { name: "cfg", type: "number", label: "CFG (optional)", default: "" },
+          { name: "seed", type: "number", label: "Seed (-1=random)", default: "" },
+        ]
+      },
+    ]
+  },
+  {
+    section: "Music",
+    items: [
+      {
+        id: "music", method: "POST", path: "/v1/music/generations",
+        desc: "Generate music via ComfyUI",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "music", default: "ace_step_1.5_xl_turbo" },
+          { name: "tags", type: "text", label: "Tags / Style", default: "lo-fi, chill, ambient" },
+          { name: "lyrics", type: "textarea", label: "Lyrics (optional)", default: "" },
+          { name: "duration", type: "number", label: "Duration (s)", default: 30 },
+          { name: "bpm", type: "number", label: "BPM", default: 120 },
+          { name: "seed", type: "number", label: "Seed (0=random)", default: 0 },
+          { name: "timesignature", type: "text", label: "Time Sig", default: "4" },
+          { name: "language", type: "text", label: "Language", default: "en" },
+          { name: "keyscale", type: "text", label: "Key", default: "E minor" },
+        ]
+      },
+    ]
+  },
+  {
+    section: "Errors",
+    items: [
+      {
+        id: "err-model", method: "POST", path: "/v1/chat/completions",
+        desc: "Test: unknown model → 400",
+        fields: [
+          { name: "model", type: "text", label: "Model", default: "nonexistent-model" },
+          { name: "messages", type: "textarea", label: "Messages", default: JSON.stringify([{"role":"user","content":"hi"}], null, 2) },
+        ]
+      },
+      {
+        id: "err-image", method: "POST", path: "/v1/images/generations",
+        desc: "Test: missing prompt → 400",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "image", default: "krea2" },
+        ]
+      },
+      {
+        id: "err-music", method: "POST", path: "/v1/music/generations",
+        desc: "Test: missing tags → 400",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "music", default: "ace_step_1.5_xl_turbo" },
+        ]
+      },
+    ]
+  },
+];
+
+// ── State ─────────────────────────────────────────────────────────────
+let activeCategory = "all";
+let modelCache = { llama: [], stt: [], tts: [], image: [], music: [], embedding: [] };
+
+// ── Build chips ───────────────────────────────────────────────────────
+function buildChips() {
+  const bar = document.getElementById("chipsBar");
+  const sections = ["all", ...new Set(ENDPOINTS.map(s => s.section))];
+  bar.innerHTML = sections.map(s =>
+    `<div class="chip ${s === activeCategory ? 'active' : ''}" onclick="filterCategory('${s}')">${s === 'all' ? 'All' : s}</div>`
+  ).join("");
+}
+
+function filterCategory(cat) {
+  activeCategory = cat;
+  buildChips();
+  buildCards();
+}
+
+// ── Build cards ───────────────────────────────────────────────────────
+function buildCards() {
+  const container = document.getElementById("cards");
+  container.innerHTML = "";
+  for (const section of ENDPOINTS) {
+    if (activeCategory !== "all" && section.section !== activeCategory) continue;
+    for (const ep of section.items) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.id = "card-" + ep.id;
+
+      card.innerHTML = `
+        <div class="card-head" onclick="toggleCard('${ep.id}')">
+          <span class="card-method ${ep.method.toLowerCase()}">${ep.method}</span>
+          <span class="card-path">${ep.path}</span>
+          <span class="card-chevron">▾</span>
+        </div>
+        <div class="card-desc">${ep.desc}</div>
+        <div class="card-body" id="body-${ep.id}"></div>
+      `;
+      container.appendChild(card);
+    }
+  }
+}
+
+function toggleCard(id) {
+  const card = document.getElementById("card-" + id);
+  const wasOpen = card.classList.contains("open");
+  // Close all
+  document.querySelectorAll(".card.open").forEach(c => c.classList.remove("open"));
+  if (!wasOpen) {
+    card.classList.add("open");
+    renderCardBody(id);
+  }
+}
+
+function renderCardBody(epId) {
+  const ep = findEndpoint(epId);
+  if (!ep) return;
+  const body = document.getElementById("body-" + epId);
+  if (body.innerHTML.trim() !== "") return; // already rendered
+
+  let html = "";
+  if (ep.fields) {
+    for (const f of ep.fields) {
+      const val = f.default !== undefined ? f.default : "";
+      html += `<div class="field"><label>${f.label}</label>`;
+      if (f.type === "textarea") {
+        html += `<textarea id="f_${epId}_${f.name}">${escHtml(String(val))}</textarea>`;
+      } else if (f.type === "select") {
+        html += `<select id="f_${epId}_${f.name}"><option value="">(load models…)</option></select><div class="hint">Populated from /v1/models</div>`;
+      } else if (f.type === "checkbox") {
+        html += `<label class="check"><input type="checkbox" id="f_${epId}_${f.name}" ${val ? "checked" : ""} /> ${f.label}</label>`;
+      } else if (f.type === "file") {
+        html += `<input type="file" id="f_${epId}_${f.name}" ${f.accept ? `accept="${f.accept}"` : ""} />`;
+      } else {
+        html += `<input type="${f.type === "number" ? "number" : "text"}" id="f_${epId}_${f.name}" value="${escHtml(String(val))}" />`;
+      }
+      html += `</div>`;
+    }
+  }
+  html += `<div class="send-row"><button class="btn-send" id="btn-${epId}" onclick="sendRequest('${epId}')">Send</button><span class="timer" id="timer-${epId}"></span></div>`;
+  html += `<div class="response-area" id="resp-${epId}" style="display:none"><div class="response-header"><span class="status" id="respStatus-${epId}"></span><span id="respMeta-${epId}"></span></div><div class="response-body" id="respBody-${epId}"></div></div>`;
+  body.innerHTML = html;
+  populateSelects(ep, epId);
+}
+
+function populateSelects(ep, epId) {
+  if (!ep.fields) return;
+  for (const f of ep.fields) {
+    if (f.type !== "select") continue;
+    const sel = document.getElementById(`f_${epId}_${f.name}`);
+    if (!sel) continue;
+    const list = modelCache[f.options] || [];
+    sel.innerHTML = "";
+    for (const m of list) {
+      const opt = document.createElement("option");
+      opt.value = m; opt.textContent = m;
+      sel.appendChild(opt);
+    }
+    const def = f.default || (list[0] || "");
+    sel.value = def;
+  }
+}
+
+function findEndpoint(id) {
+  for (const s of ENDPOINTS) for (const e of s.items) if (e.id === id) return e;
+  return null;
+}
+
+// ── Fetch models ──────────────────────────────────────────────────────
+async function fetchModels() {
+  const base = getBase();
+  try {
+    const r = await fetch(`${base}/v1/models`);
+    if (!r.ok) return;
+    const data = await r.json();
+    modelCache.llama = []; modelCache.stt = []; modelCache.tts = [];
+    modelCache.image = []; modelCache.music = []; modelCache.embedding = [];
+    for (const m of data.data) {
+      if (m.owned_by === "llama") {
+        if (m.type === "embedding") modelCache.embedding.push(m.id);
+        else modelCache.llama.push(m.id);
+      } else if (m.owned_by === "crispasr") {
+        if (m.id.includes("asr") || m.id.includes("transcription")) modelCache.stt.push(m.id);
+        else modelCache.tts.push(m.id);
+      } else if (m.owned_by === "comfyui") {
+        if (m.type === "music") modelCache.music.push(m.id);
+        else modelCache.image.push(m.id);
+      }
+    }
+    if (modelCache.stt.length === 0) modelCache.stt = data.data.filter(m => m.owned_by === "crispasr").map(m => m.id);
+    // Refresh open cards
+    document.querySelectorAll(".card.open").forEach(c => {
+      const id = c.id.replace("card-", "");
+      const ep = findEndpoint(id);
+      if (ep) populateSelects(ep, id);
+    });
+  } catch {}
+}
+
+// ── Send request ──────────────────────────────────────────────────────
+async function sendRequest(epId) {
+  const ep = findEndpoint(epId);
+  if (!ep) return;
+  const base = getBase();
+  const btn = document.getElementById("btn-" + epId);
+  const timer = document.getElementById("timer-" + epId);
+  const respArea = document.getElementById("resp-" + epId);
+  const respStatus = document.getElementById("respStatus-" + epId);
+  const respMeta = document.getElementById("respMeta-" + epId);
+  const respBody = document.getElementById("respBody-" + epId);
+
+  btn.disabled = true; btn.textContent = "Sending…";
+  timer.textContent = "";
+  respArea.style.display = "block";
+  respStatus.textContent = ""; respMeta.textContent = ""; respBody.innerHTML = "";
+
+  const t0 = performance.now();
+
+  try {
+    if (ep.method === "GET") {
+      const r = await fetch(`${base}${ep.path}`);
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showResponse(r, elapsed, respStatus, respMeta, respBody, base);
+    } else if (ep.id === "stt") {
+      const model = document.getElementById(`f_${epId}_model`).value;
+      const fileInput = document.getElementById(`f_${epId}_file`);
+      if (!fileInput.files.length) throw new Error("No audio file selected");
+      const fd = new FormData();
+      fd.append("file", fileInput.files[0]);
+      fd.append("model", model);
+      const r = await fetch(`${base}${ep.path}`, { method: "POST", body: fd });
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showResponse(r, elapsed, respStatus, respMeta, respBody, base);
+    } else if (ep.id === "tts") {
+      const model = document.getElementById(`f_${epId}_model`).value;
+      const input = document.getElementById(`f_${epId}_input`).value;
+      const voice = document.getElementById(`f_${epId}_voice`)?.value || "";
+      const ttsBody = { model, input };
+      if (voice) ttsBody.voice = voice;
+      const r = await fetch(`${base}${ep.path}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ttsBody),
+      });
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showAudioResponse(r, elapsed, respStatus, respMeta, respBody);
+    } else if (ep.id === "music") {
+      const body = buildBody(ep, epId);
+      const r = await fetch(`${base}${ep.path}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showMusicResponse(r, elapsed, respStatus, respMeta, respBody, base);
+    } else if (ep.id === "embeddings") {
+      const model = document.getElementById(`f_${epId}_model`).value;
+      const inputRaw = document.getElementById(`f_${epId}_input`).value;
+      let input;
+      try { input = JSON.parse(inputRaw); } catch { input = inputRaw; }
+      const r = await fetch(`${base}${ep.path}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, input }),
+      });
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showResponse(r, elapsed, respStatus, respMeta, respBody, base);
+    } else {
+      const body = buildBody(ep, epId);
+      const streamField = body.stream !== undefined ? body.stream : false;
+      const r = await fetch(`${base}${ep.path}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      if (streamField) {
+        showStreamResponse(r, t0, respStatus, respMeta, respBody, epId);
+        return;
+      }
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showResponse(r, elapsed, respStatus, respMeta, respBody, base);
+    }
+  } catch (e) {
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+    respStatus.textContent = "ERROR"; respStatus.className = "status s5xx";
+    respMeta.textContent = `${elapsed}s`;
+    respBody.innerHTML = `<span style="color:var(--red)">${escHtml(String(e))}</span>`;
+  }
+  btn.disabled = false; btn.textContent = "Send";
+}
+
+function buildBody(ep, epId) {
+  const body = {};
+  for (const f of ep.fields) {
+    if (f.type === "checkbox") {
+      body[f.name] = document.getElementById(`f_${epId}_${f.name}`).checked;
+    } else if (f.name === "messages") {
+      try { body[f.name] = JSON.parse(document.getElementById(`f_${epId}_${f.name}`).value); }
+      catch { body[f.name] = document.getElementById(`f_${epId}_${f.name}`).value; }
+    } else {
+      const el = document.getElementById(`f_${epId}_${f.name}`);
+      const v = el.value;
+      if (f.type === "number" && v !== "") body[f.name] = Number(v);
+      else if (v !== "") body[f.name] = v;
+    }
+  }
+  return body;
+}
+
+async function loadImageData(base, path) {
+  try {
+    const r = await fetch(`${base}/v1/data/${encodeURIComponent(path)}`);
+    if (r.ok) {
+      const d = await r.json();
+      return d.b64_json ? `data:${d.content_type};base64,${d.b64_json}` : null;
+    }
+  } catch {}
+  return null;
+}
+
+async function showResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
+  statusEl.textContent = `${r.status} ${r.statusText}`;
+  statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
+  metaEl.textContent = `${elapsed}s  |  ${r.headers.get("content-type") || "unknown"}`;
+  const ct = r.headers.get("content-type") || "";
+  if (ct.includes("json")) {
+    const d = await r.json();
+    if (Array.isArray(d.data) && d.data.length > 0 && (d.data[0].path || d.data[0].b64_json)) {
+      bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} image(s) — loading…</div>`;
+      for (const item of d.data) {
+        const div = document.createElement("div"); div.style.marginTop = "12px";
+        if (item.b64_json) {
+          div.innerHTML = `<img src="data:image/png;base64,${item.b64_json}" style="max-width:100%;border-radius:var(--radius-sm);">`;
+        } else if (item.path) {
+          div.innerHTML = `<img src="" style="max-width:100%;border-radius:var(--radius-sm);display:none;"><span style="font-size:12px;color:var(--muted);">loading…</span>`;
+          const img = div.querySelector("img"); const loading = div.querySelector("span");
+          const src = await loadImageData(base, item.path);
+          if (src) { img.src = src; img.style.display = "block"; loading.style.display = "none"; }
+          else loading.textContent = `⚠ ${escHtml(item.path)}`;
+        }
+        bodyEl.appendChild(div);
+      }
+      const details = document.createElement("details"); details.style.marginTop = "12px";
+      details.innerHTML = `<summary style="cursor:pointer;font-size:12px;color:var(--muted);">Raw JSON</summary><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;">${syntaxHighlight(JSON.stringify(d, null, 2))}</pre>`;
+      bodyEl.appendChild(details);
+    } else {
+      bodyEl.innerHTML = syntaxHighlight(JSON.stringify(d, null, 2));
+    }
+  } else {
+    r.text().then(t => { bodyEl.innerHTML = escHtml(t); });
+  }
+}
+
+function showAudioResponse(r, elapsed, statusEl, metaEl, bodyEl) {
+  statusEl.textContent = `${r.status} ${r.statusText}`;
+  statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
+  const ct = r.headers.get("content-type") || "audio/wav";
+  metaEl.textContent = `${elapsed}s  |  ${ct}`;
+  if (r.ok) {
+    r.blob().then(blob => {
+      const url = URL.createObjectURL(blob);
+      bodyEl.innerHTML = `<audio controls autoplay src="${url}"></audio><br><span style="color:var(--muted);font-size:11px">${(blob.size / 1024).toFixed(1)} KB</span>`;
+    });
+  } else {
+    r.text().then(t => { bodyEl.innerHTML = `<span style="color:var(--red)">${escHtml(t)}</span>`; });
+  }
+}
+
+async function showMusicResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
+  statusEl.textContent = `${r.status} ${r.statusText}`;
+  statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
+  metaEl.textContent = `${elapsed}s  |  ${r.headers.get("content-type") || "unknown"}`;
+  if (r.ok) {
+    const d = await r.json();
+    if (Array.isArray(d.data) && d.data.length > 0) {
+      bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} audio file(s) — loading…</div>`;
+      for (const item of d.data) {
+        const path = item.path || item.url || "";
+        if (path) {
+          const div = document.createElement("div"); div.style.marginTop = "12px";
+          div.innerHTML = `<audio controls style="width:100%;display:none;"></audio><span style="font-size:12px;color:var(--muted);">loading…</span>`;
+          const audio = div.querySelector("audio"); const loading = div.querySelector("span");
+          const src = await loadImageData(base, path);
+          if (src) { audio.src = src; audio.style.display = "block"; loading.style.display = "none"; }
+          else loading.textContent = `⚠ ${escHtml(path)}`;
+          bodyEl.appendChild(div);
+        }
+      }
+      const details = document.createElement("details"); details.style.marginTop = "12px";
+      details.innerHTML = `<summary style="cursor:pointer;font-size:12px;color:var(--muted);">Raw JSON</summary><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;">${syntaxHighlight(JSON.stringify(d, null, 2))}</pre>`;
+      bodyEl.appendChild(details);
+    } else {
+      bodyEl.innerHTML = syntaxHighlight(JSON.stringify(d, null, 2));
+    }
+  } else {
+    r.text().then(t => { bodyEl.innerHTML = `<span style="color:var(--red)">${escHtml(t)}</span>`; });
+  }
+}
+
+function showStreamResponse(r, t0, statusEl, metaEl, bodyEl, epId) {
+  statusEl.textContent = `${r.status} ${r.statusText}`;
+  statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
+  metaEl.textContent = "streaming…"; bodyEl.innerHTML = "";
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "", content = "";
+  function read() {
+    return reader.read().then(({ done, value }) => {
+      if (done) {
+        metaEl.textContent = `${((performance.now() - t0) / 1000).toFixed(2)}s  |  text/event-stream`;
+        document.getElementById("btn-" + epId).disabled = false;
+        document.getElementById("btn-" + epId).textContent = "Send";
+        return;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n"); buffer = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          if (data === "[DONE]") break;
+          try {
+            const delta = JSON.parse(data).choices?.[0]?.delta?.content || "";
+            if (delta) { content += delta; bodyEl.innerHTML = escHtml(content); bodyEl.scrollTop = bodyEl.scrollHeight; }
+          } catch {}
+        }
+      }
+      return read();
+    });
+  }
+  read();
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+function escHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function syntaxHighlight(json) {
+  json = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, m => {
+    let c = "#fbbf24";
+    if (/^"/.test(m)) c = m.endsWith(":") ? "#6c8cff" : "#34d399";
+    else if (/true|false/.test(m)) c = "#a78bfa";
+    else if (/null/.test(m)) c = "#f87171";
+    return `<span style="color:${c}">${m}</span>`;
+  });
+}
+function getBase() {
+  return document.getElementById("baseUrlInput").value.trim().replace(/\/+$/, "");
+}
+
+// ── Health check ──────────────────────────────────────────────────────
+async function healthCheck() {
+  const base = getBase();
+  const dot = document.getElementById("statusDot");
+  const label = document.getElementById("statusLabel");
+  try {
+    const r = await fetch(`${base}/status`, { signal: AbortSignal.timeout(3000) });
+    dot.className = r.ok ? "status-dot online" : "status-dot offline";
+    label.textContent = r.ok ? "Online" : `⚠ ${r.status}`;
+  } catch {
+    dot.className = "status-dot offline";
+    label.textContent = "Offline";
+  }
+}
+
+// ── URL Modal ─────────────────────────────────────────────────────────
+function showUrlModal() {
+  document.getElementById("urlModal").classList.add("show");
+  document.getElementById("baseUrlInput").focus();
+}
+function hideUrlModal(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById("urlModal").classList.remove("show");
+}
+function saveBaseUrl() {
+  hideUrlModal();
+  fetchModels(); healthCheck();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────
+buildChips();
+buildCards();
+fetchModels();
+healthCheck();
+setInterval(healthCheck, 5000);
+</script>
+</body>
+</html>
