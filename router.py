@@ -389,13 +389,19 @@ def create_app(config: RouterConfig) -> FastAPI:
     async def frontend():
         """Serve the interactive test console frontend."""
         html_path = Path(__file__).parent / "frontend.html"
-        return HTMLResponse(content=html_path.read_text())
+        return HTMLResponse(
+            content=html_path.read_text(),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     @app.get("/mobile")
     async def mobile():
         """Serve the mobile-friendly frontend."""
         html_path = Path(__file__).parent / "mobile.html"
-        return HTMLResponse(content=html_path.read_text())
+        return HTMLResponse(
+            content=html_path.read_text(),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     _MIME_MAP = {
         ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
