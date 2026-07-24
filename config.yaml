@@ -197,6 +197,29 @@ backends:
     ram_usage: 0.2
     health_timeout: 15
 
+  nanbeige4.2-3b:
+    type: llama
+    binary: /home/lochlainn/llama.cpp/build/bin/llama-server
+    model: ~/models/llm/nanbeige4.2-3b-Q8_0.gguf
+    port: 8085
+    context_size: 65536
+    gpu_layers: 99
+    vram_usage: 16
+    retries: 1
+    health_timeout: 60
+    extra_args:
+      - "--batch-size"
+      - "2048"
+      - "--ubatch-size"
+      - "512"
+      - "--temp"
+      - "1.0"
+      - "--top-p"
+      - "0.95"
+      - "--top-k"
+      - "20"
+      - "--reasoning-preserve"
+
   gemma-4-12b-it:
     type: llama
     binary: llama-server
