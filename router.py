@@ -95,6 +95,9 @@ def create_app(config: RouterConfig) -> FastAPI:
         app.state.http = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=10)
         )
+        # Check for unmanaged VRAM consumers on startup.
+        await orch.check_unmanaged_vram()
+        orch.start_vram_monitor()
         yield
         await app.state.http.close()
         await orch.shutdown()
@@ -480,6 +483,27 @@ def create_app(config: RouterConfig) -> FastAPI:
 
         asyncio.create_task(_exit())
         return {"restarted": True, "stopped": [s.config.name for s in running]}
+
+    @app.get("/v1/models/vram-hogs")
+    async def vram_hogs():
+        """List external GPU processes consuming VRAM (not managed by the router)."""
+        hogs = await orch.detect_vram_hogs()
+        return {
+            "hogs": [
+                {"pid": pid, "vram_gb": round(gb, 2), "name": name}
+                for pid, gb, name in hogs
+            ],
+            "total_hog_vram_gb": round(sum(gb for _, gb, _ in hogs), 2),
+        }
+
+    @app.post("/v1/models/kill-vram-hogs")
+    async def kill_vram_hogs():
+        """Kill external GPU processes that are consuming VRAM (not managed backends)."""
+        freed = await orch.kill_vram_hogs()
+        return {
+            "killed": freed > 0,
+            "freed_gb": round(freed, 2),
+        }
 
     return app
 

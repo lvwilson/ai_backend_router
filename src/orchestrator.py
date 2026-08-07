@@ -37,6 +37,7 @@ from .service_loader import (
     query_vram_used_gb,
     query_vram_total_gb,
     query_per_process_vram,
+    query_per_process_vram_with_names,
 )
 
 
@@ -66,6 +67,31 @@ logger = logging.getLogger(__name__)
 
 EVICTION_CONFIRM_TIMEOUT = 15.0   # Seconds to wait for VRAM to drop after eviction
 EVICTION_CONFIRM_INTERVAL = 0.5   # Poll interval while confirming
+
+# External GPU processes that are considered "default" system consumers
+# and should not be killed as VRAM hogs. Matched against the process name
+# (from nvidia-smi --query-compute-apps=name) using substring matching.
+DEFAULT_GPU_APPS = (
+    "Xorg",
+    "gnome-shell",
+    "kwin",
+    "steamwebhelper",
+    "steam",
+    "mutter",
+    "kwin_x11",
+    "kwin_wayland",
+    "pipewire",
+    "wireplumber",
+    "firefox",
+    "chrome",
+    "chromium",
+)
+
+# Minimum VRAM usage (GB) for an external process to be considered a "hog".
+VRAM_HOG_THRESHOLD_GB = 0.1  # ~100 MiB
+
+# If unmanaged VRAM usage exceeds this on startup, log a warning.
+VRAM_UNMANAGED_WARN_GB = 2.0
 
 
 class InsufficientVRAMError(Exception):
@@ -112,6 +138,9 @@ class Orchestrator:
         # Extra VRAM attributed beyond the process itself — e.g. the model a
         # warm ComfyUI instance currently holds resident (loaded on demand).
         self._extra_vram: dict[str, float] = {}
+        # VRAM warning state
+        self._vram_warned_at: float | None = None
+        self._vram_monitor_task: asyncio.Task | None = None
 
     # ── VRAM accounting ──────────────────────────────────────────────────
 
@@ -289,6 +318,16 @@ class Orchestrator:
                 f"{self.total_vram_gb - self.vram_reserve_gb:.1f} GB"
             )
 
+        # Before evicting our own backends, try killing external VRAM hogs.
+        if not cpu:
+            freed = await self.kill_vram_hogs(
+                target_gb=needed_gb - available,
+            )
+            if freed > 0:
+                available = await self.available_vram_gb()
+                if available >= needed_gb:
+                    return
+
         victims = sorted(
             (s for s in self._running() if s.config.name != exclude),
             key=tracker,
@@ -376,14 +415,200 @@ class Orchestrator:
         except Exception as exc:
             logger.error("Failed to force-kill PID %d: %s", pid, exc)
 
+    # ── VRAM hog detection & killing ──────────────────────────────────────
+
+    def _managed_pids(self) -> set[int]:
+        """Return the set of PIDs belonging to our managed backends."""
+        pids: set[int] = set()
+        for loader in self._running():
+            if loader.pid is not None:
+                pids.add(loader.pid)
+        return pids
+
+    def _is_default_app(self, process_name: str) -> bool:
+        """Check if a process name matches a known default GPU consumer."""
+        name_lower = process_name.lower()
+        for default in DEFAULT_GPU_APPS:
+            if default.lower() in name_lower:
+                return True
+        return False
+
+    async def detect_vram_hogs(self) -> list[tuple[int, float, str]]:
+        """
+        Detect external GPU processes that are VRAM hogs.
+
+        Returns a list of (PID, VRAM_GB, process_name) tuples for processes
+        that are:
+        - Not managed by this orchestrator
+        - Not a known default GPU consumer (Xorg, steamwebhelper, etc.)
+        - Using more than VRAM_HOG_THRESHOLD_GB
+
+        Sorted by VRAM usage descending (biggest hogs first).
+        """
+        named = await query_per_process_vram_with_names()
+        if not named:
+            return []
+
+        managed_pids = self._managed_pids()
+        hogs: list[tuple[int, float, str]] = []
+
+        for pid, gb, name in named:
+            if pid in managed_pids:
+                continue
+            if self._is_default_app(name):
+                continue
+            if gb >= VRAM_HOG_THRESHOLD_GB:
+                hogs.append((pid, gb, name))
+
+        # Sort by VRAM usage descending
+        hogs.sort(key=lambda t: t[1], reverse=True)
+        return hogs
+
+    async def kill_vram_hogs(self, target_gb: float | None = None) -> float:
+        """
+        Kill external VRAM hog processes to free memory.
+
+        Args:
+            target_gb: If set, keep killing hogs until at least this many GB
+                are freed. If None, kill all detected hogs.
+
+        Returns the total GB freed.
+        """
+        hogs = await self.detect_vram_hogs()
+        if not hogs:
+            logger.debug("No external VRAM hogs detected")
+            return 0.0
+
+        freed = 0.0
+        for pid, gb, name in hogs:
+            if target_gb is not None and freed >= target_gb:
+                break
+
+            logger.info(
+                "VRAM hog: killing '%s' (PID %d, %.1f GB)",
+                name, pid, gb,
+            )
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+                freed += gb
+            except (ProcessLookupError, PermissionError, OSError) as exc:
+                logger.warning(
+                    "Failed to kill VRAM hog PID %d ('%s'): %s",
+                    pid, name, exc,
+                )
+
+        if freed > 0:
+            logger.info("Killed VRAM hogs, freed ~%.1f GB", freed)
+            # Brief pause to let the kernel release the VRAM.
+            await asyncio.sleep(0.5)
+        return freed
+
+    async def _unmanaged_vram_gb(self) -> float:
+        """
+        Sum of VRAM used by processes not managed by this orchestrator
+        and not in the default-apps list.
+        """
+        named = await query_per_process_vram_with_names()
+        if not named:
+            return 0.0
+        managed_pids = self._managed_pids()
+        total = 0.0
+        for pid, gb, name in named:
+            if pid not in managed_pids and not self._is_default_app(name):
+                total += gb
+        return total
+
+    # ── VRAM monitoring ──────────────────────────────────────────────────
+
+    async def _vram_monitor_loop(self) -> None:
+        """
+        Background loop that warns when unmanaged VRAM usage is high.
+        Runs until cancelled.
+        """
+        while True:
+            try:
+                await asyncio.sleep(30.0)
+                unmanaged = await self._unmanaged_vram_gb()
+                if unmanaged > VRAM_UNMANAGED_WARN_GB:
+                    now = time.monotonic()
+                    if (self._vram_warned_at is None
+                            or (now - self._vram_warned_at) >= 30.0):
+                        self._vram_warned_at = now
+                        logger.warning(
+                            "Unmanaged VRAM usage: %.1f GB (threshold %.1f GB) — "
+                            "external GPU applications detected: %s",
+                            unmanaged,
+                            VRAM_UNMANAGED_WARN_GB,
+                            ", ".join(
+                                f"{name}({gb:.1f}GB)"
+                                for _, gb, name in await self.detect_vram_hogs()
+                            ),
+                        )
+                else:
+                    self._vram_warned_at = None
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.debug("VRAM monitor error: %s", exc)
+
+    async def check_unmanaged_vram(self) -> float:
+        """
+        Check and warn about unmanaged VRAM usage. Called on startup.
+
+        Returns the unmanaged VRAM in GB.
+        """
+        unmanaged = await self._unmanaged_vram_gb()
+        if unmanaged > VRAM_UNMANAGED_WARN_GB:
+            hogs = await self.detect_vram_hogs()
+            logger.warning(
+                "Startup VRAM check: %.1f GB unmanaged VRAM "
+                "(threshold %.1f GB) — external processes: %s",
+                unmanaged,
+                VRAM_UNMANAGED_WARN_GB,
+                ", ".join(
+                    f"{name}({gb:.1f}GB)" for _, gb, name in hogs
+                ) if hogs else "none above hog threshold",
+            )
+        return unmanaged
+
+    def start_vram_monitor(self) -> None:
+        """Start the background VRAM monitoring task."""
+        if self._vram_monitor_task is not None and not self._vram_monitor_task.done():
+            return  # Already running
+        self._vram_monitor_task = asyncio.create_task(self._vram_monitor_loop())
+
+    async def stop_vram_monitor(self) -> None:
+        """Stop the background VRAM monitoring task."""
+        if self._vram_monitor_task is not None:
+            self._vram_monitor_task.cancel()
+            try:
+                await self._vram_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._vram_monitor_task = None
+
+    async def _emit_monitor_event(self, name: str, payload: dict[str, Any]) -> None:
+        """Emit an event through all service callbacks (for monitoring events)."""
+        for loader in self.services.values():
+            if loader._event_callback is not None:
+                try:
+                    await loader._event_callback(name, payload)
+                except Exception as exc:
+                    logger.debug("Monitor event callback error: %s", exc)
+
     # ── Status & shutdown ────────────────────────────────────────────────
 
     async def get_status(self) -> dict[str, Any]:
         """Snapshot of the whole fleet, suitable for a /status endpoint."""
+        hogs = await self.detect_vram_hogs()
         return {
             "total_vram_gb": self.total_vram_gb,
             "vram_reserve_gb": self.vram_reserve_gb,
             "available_vram_gb": round(await self.available_vram_gb(), 2),
+            "vram_hogs": [
+                {"pid": pid, "vram_gb": round(gb, 2), "name": name}
+                for pid, gb, name in hogs
+            ],
             "services": {
                 name: await s.get_status() for name, s in self.services.items()
             },
@@ -391,6 +616,7 @@ class Orchestrator:
 
     async def shutdown(self) -> None:
         """Gracefully stop all running backends (router shutdown hook)."""
+        await self.stop_vram_monitor()
         running = self._running()
         if running:
             logger.info("Shutting down %d running backend(s)", len(running))

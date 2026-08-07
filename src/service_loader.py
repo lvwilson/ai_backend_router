@@ -154,40 +154,52 @@ async def query_per_process_vram() -> dict[int, float]:
     Returns a dict mapping PID (int) → VRAM usage in GB.
     Returns empty dict if nvidia-smi is unavailable.
     """
+    named = await query_per_process_vram_with_names()
+    return {pid: gb for pid, gb, _ in named}
+
+
+async def query_per_process_vram_with_names() -> list[tuple[int, float, str]]:
+    """
+    Query VRAM usage per GPU process via nvidia-smi --query-compute-apps.
+
+    Returns a list of (PID, VRAM_GB, process_name) tuples.
+    Returns empty list if nvidia-smi is unavailable.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             "nvidia-smi",
-            "--query-compute-apps=pid,used_memory",
+            "--query-compute-apps=pid,used_memory,name",
             "--format=csv,noheader",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
-            return {}
+            return []
 
-        result: dict[int, float] = {}
+        result: list[tuple[int, float, str]] = []
         for line in stdout.decode().strip().splitlines():
             line = line.strip()
             if not line:
                 continue
             parts = line.split(",")
-            if len(parts) < 2:
+            if len(parts) < 3:
                 continue
             pid_str = parts[0].strip()
             mem_str = parts[1].strip()
+            name = parts[2].strip()
             try:
                 pid = int(pid_str)
                 # Memory is in "NNN MiB" format
                 mem_mi = float(mem_str.split()[0])
-                result[pid] = mem_mi / 1024.0
+                result.append((pid, mem_mi / 1024.0, name))
             except (ValueError, IndexError):
                 continue
         return result
     except FileNotFoundError:
-        return {}
+        return []
     except Exception:
-        return {}
+        return []
 
 
 async def query_process_vram(pid: int) -> float | None:
