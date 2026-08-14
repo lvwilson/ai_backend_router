@@ -188,10 +188,6 @@
       "vae": [
         "105:11",
         0
-      ],
-      "first_frame": [
-        "119",
-        0
       ]
     },
     "class_type": "MiniMaxH3ImageToVideo",

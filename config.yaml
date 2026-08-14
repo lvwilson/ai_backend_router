@@ -287,6 +287,10 @@ backends:
         workflow: ~/projectnotes/workflows/audio_ace_step1_5_xl_turbo.json
         vram_usage: 28
     video_models:
+      minimax_h3_t2v_turbo:
+        workflow: ~/projectnotes/workflows/minimax_h3_t2v_turbo.json
+        vram_usage: 40
       minimax_h3_i2v_turbo:
         workflow: ~/projectnotes/workflows/minimax_h3_i2v_turbo.json
         vram_usage: 40
+
