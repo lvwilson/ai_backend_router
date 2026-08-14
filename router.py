@@ -389,7 +389,11 @@ def create_app(config: RouterConfig) -> FastAPI:
             created=int(time.time()),
         )
 
-    # ── Video route (translated) ─────────────────────────────────────────
+    # ── Video route (translated, LLM-augmented) ──────────────────────────
+
+    # The Minimax H3 prompt-writing guide — read once at startup.
+    _VIDEO_GUIDE_PATH = Path(__file__).parent / "untracked" / "minimax_h3_guide.md"
+    _VIDEO_GUIDE = _VIDEO_GUIDE_PATH.read_text() if _VIDEO_GUIDE_PATH.exists() else ""
 
     @app.post("/v1/videos/generations")
     async def videos(request: Request):
@@ -407,11 +411,71 @@ def create_app(config: RouterConfig) -> FastAPI:
         except KeyError as exc:
             return error(400, str(exc))
 
+        # Determine mode from model name for the LLM instruction.
+        is_i2v = "i2v" in video_model.name.lower()
+        mode_label = "I2VA" if is_i2v else "T2VA"
+
+        # ── Augment the prompt via qwen3.6-27b-instruct ──────────────────
+        augment_backend = "qwen3.6-27b-instruct"
+
+        system_msg = (
+            f"You are a video prompt engineer. Rewrite the user's brief idea into a "
+            f"detailed, creative {mode_label} prompt for the MiniMax H3 video model. "
+            f"Follow the guide below exactly.\n\n"
+            f"## MiniMax H3 Video Prompt Writing Guide\n\n"
+            f"{_VIDEO_GUIDE}\n\n"
+            f"## Instructions\n\n"
+            f"- Produce a highly detailed, vivid, cinematic prompt.\n"
+            f"- Use temperature 1.0 — be creative and imaginative.\n"
+            f"- Output ONLY the final prompt (instruction line if I2VA, then the three "
+            f"core fields). Do not include any explanation or markdown wrapping.\n"
+            f"- For I2VA: begin with the first-frame instruction, then a blank line, "
+            f"then the three core fields. Reference <Picture 1> in the description.\n"
+            f"- For T2VA: begin directly with the three core fields (no instruction line).\n"
+            f"- The video duration is {req.get('duration', 3.0)} seconds.\n"
+        )
+
+        user_msg = f"Create a {mode_label} video from this idea:\n\n{prompt}"
+
+        llm_request = {
+            "model": augment_backend,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 1.0,
+            "max_tokens": 1024,
+        }
+
+        try:
+            loader = await orch.ensure_running(augment_backend)
+        except InsufficientVRAMError as exc:
+            return error(507, str(exc))
+        except (KeyError, RuntimeError) as exc:
+            return error(503, str(exc))
+
+        llm_port = loader.config.port
+        llm_url = f"http://127.0.0.1:{llm_port}/v1/chat/completions"
+        http: aiohttp.ClientSession = app.state.http
+
+        try:
+            async with http.post(llm_url, json=llm_request) as llm_resp:
+                llm_body = await llm_resp.json()
+                if llm_resp.status != 200:
+                    return error(502, f"Prompt augmentation failed: {llm_body}")
+                augmented_prompt = llm_body.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                if not augmented_prompt:
+                    return error(502, "Prompt augmentation returned empty response")
+        except aiohttp.ClientError as exc:
+            return error(503, f"LLM backend unreachable for prompt augmentation: {exc}")
+
+        logger.info("Augmented video prompt (%d chars): %.200s…", len(augmented_prompt), augmented_prompt)
+
         try:
             workflow = json.loads(Path(video_model.workflow).read_text())
             workflow = inject_video_parameters(
                 workflow,
-                prompt=prompt,
+                prompt=augmented_prompt,
                 duration=req.get("duration", 3.0),
                 seed=req.get("seed"),
                 image=req.get("image"),
