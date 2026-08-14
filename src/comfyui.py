@@ -460,8 +460,8 @@ class ComfyUIClient:
         entry = history.get(prompt_id, {})
         videos: list[dict[str, Any]] = []
         for node_output in entry.get("outputs", {}).values():
-            # SaveVideo outputs under "videos" key
-            for video in node_output.get("videos", []):
+            # SaveVideo outputs under "images" key (PreviewVideo.as_dict returns {"images": ...})
+            for video in node_output.get("images", []):
                 if video.get("type") != "output":
                     continue
                 record = dict(video)
