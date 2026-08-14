@@ -14,42 +14,6 @@
       "title": "Save Video"
     }
   },
-  "114": {
-    "inputs": {
-      "image": "Krea2_00121_.png"
-    },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "Load Image"
-    }
-  },
-  "119": {
-    "inputs": {
-      "upscale_method": "nearest-exact",
-      "megapixels": 0.4,
-      "resolution_steps": 32,
-      "image": [
-        "114",
-        0
-      ]
-    },
-    "class_type": "ImageScaleToTotalPixels",
-    "_meta": {
-      "title": "Scale Image to Total Pixels"
-    }
-  },
-  "120": {
-    "inputs": {
-      "image": [
-        "119",
-        0
-      ]
-    },
-    "class_type": "GetImageSize",
-    "_meta": {
-      "title": "Get Image Size"
-    }
-  },
   "105:11": {
     "inputs": {
       "vae_name": "minimax_h3_video_vae_fp16.safetensors"
@@ -169,14 +133,8 @@
   "105:104": {
     "inputs": {
       "prompt": "Description goes here.",
-      "width": [
-        "120",
-        0
-      ],
-      "height": [
-        "120",
-        1
-      ],
+      "width": 32,
+      "height": 32,
       "length": [
         "105:107",
         1
