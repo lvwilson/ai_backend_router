@@ -246,6 +246,33 @@ const ENDPOINTS = [
     ]
   },
   {
+    section: "Video Generation",
+    items: [
+      {
+        id: "video", method: "POST", path: "/v1/videos/generations",
+        desc: "Generate video via ComfyUI (raw prompt)",
+        fields: [
+          { name: "model", type: "select", label: "Video Model", options: "video", default: "minimax_h3_t2v_turbo" },
+          { name: "prompt", type: "textarea", label: "Prompt", default: "A curious monkey sitting on a tropical beach, slowly peeling and eating a banana while waves crash behind" },
+          { name: "duration", type: "number", label: "Duration (seconds)", default: 3 },
+          { name: "seed", type: "number", label: "Seed (optional, -1=random)", default: "" },
+          { name: "image", type: "text", label: "Image filename (I2V only)", default: "" },
+        ]
+      },
+      {
+        id: "video-augmented", method: "POST", path: "/v1/videos/generations/augmented",
+        desc: "Generate video via ComfyUI (LLM-augmented prompt)",
+        fields: [
+          { name: "model", type: "select", label: "Video Model", options: "video", default: "minimax_h3_t2v_turbo" },
+          { name: "prompt", type: "textarea", label: "Brief Idea", default: "monkey eats banana" },
+          { name: "duration", type: "number", label: "Duration (seconds)", default: 3 },
+          { name: "seed", type: "number", label: "Seed (optional, -1=random)", default: "" },
+          { name: "image", type: "text", label: "Image filename (I2V only)", default: "" },
+        ]
+      },
+    ]
+  },
+  {
     section: "Errors",
     items: [
       {
@@ -276,7 +303,7 @@ const ENDPOINTS = [
 
 // ── State ─────────────────────────────────────────────────────────────
 let activeEndpoint = null;
-let modelCache = { llama: [], stt: [], tts: [], image: [], music: [], embedding: [] };
+let modelCache = { llama: [], stt: [], tts: [], image: [], music: [], video: [], embedding: [] };
 
 // ── Build sidebar ─────────────────────────────────────────────────────
 function buildSidebar() {
@@ -370,6 +397,7 @@ async function fetchModels() {
     modelCache.tts = [];
     modelCache.image = [];
     modelCache.music = [];
+    modelCache.video = [];
     modelCache.embedding = [];
     for (const m of data.data) {
       if (m.owned_by === "llama") {
@@ -382,6 +410,7 @@ async function fetchModels() {
       }
       else if (m.owned_by === "comfyui") {
         if (m.type === "music") modelCache.music.push(m.id);
+        else if (m.type === "video") modelCache.video.push(m.id);
         else modelCache.image.push(m.id);
       }
     }
@@ -455,6 +484,16 @@ async function sendRequest() {
       });
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
       showMusicResponse(r, elapsed, respStatus, respMeta, respBody, base);
+    } else if (ep.id === "video" || ep.id === "video-augmented") {
+      // Video generation — JSON POST, returns JSON with video file paths
+      const body = buildBody(ep);
+      const r = await fetch(`${base}${ep.path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      showVideoResponse(r, elapsed, respStatus, respMeta, respBody, base);
     } else if (ep.id === "embeddings") {
       // Embeddings — JSON POST, input field is raw JSON (string or array)
       const model = document.getElementById("f_model").value;
@@ -608,6 +647,45 @@ async function showMusicResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
           if (src) {
             audio.src = src;
             audio.style.display = "block";
+            loading.style.display = "none";
+          } else {
+            loading.textContent = `⚠ Could not load: ${escHtml(path)}`;
+          }
+          bodyEl.appendChild(div);
+        }
+      }
+      const details = document.createElement("details");
+      details.style.marginTop = "12px";
+      details.innerHTML = `<summary style="cursor:pointer;font-size:12px;color:var(--muted);">Show raw JSON</summary><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;">${syntaxHighlight(JSON.stringify(d, null, 2))}</pre>`;
+      bodyEl.appendChild(details);
+    } else {
+      bodyEl.innerHTML = syntaxHighlight(JSON.stringify(d, null, 2));
+    }
+  } else {
+    r.text().then(t => { bodyEl.innerHTML = `<span style="color:var(--red)">${escHtml(t)}</span>`; });
+  }
+}
+
+async function showVideoResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
+  statusEl.textContent = `${r.status} ${r.statusText}`;
+  statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
+  metaEl.textContent = `${elapsed}s  |  ${r.headers.get("content-type") || "unknown"}`;
+  if (r.ok) {
+    const d = await r.json();
+    if (Array.isArray(d.data) && d.data.length > 0) {
+      bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} video(s) generated — loading…</div>`;
+      for (const item of d.data) {
+        const path = item.path || item.url || "";
+        if (path) {
+          const div = document.createElement("div");
+          div.style.marginTop = "12px";
+          div.innerHTML = `<video controls style="max-width:100%;border-radius:var(--radius);display:none;"></video><span style="font-size:12px;color:var(--muted);">loading…</span>`;
+          const video = div.querySelector("video");
+          const loading = div.querySelector("span");
+          const src = await loadImageData(base, path);
+          if (src) {
+            video.src = src;
+            video.style.display = "block";
             loading.style.display = "none";
           } else {
             loading.textContent = `⚠ Could not load: ${escHtml(path)}`;
