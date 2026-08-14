@@ -207,6 +207,62 @@ def build_music_openai_response(
         item["comfyui"] = {k: audio[k] for k in ("filename", "subfolder", "type") if k in audio}
         data.append(item)
     return {"created": created, "data": data}
+def inject_video_parameters(
+    workflow: dict,
+    prompt: str,
+    duration: float = 3.0,
+    seed: int | None = None,
+    image: str | None = None,
+) -> dict:
+    """
+    Return a copy of the MiniMax H3 video workflow with request parameters injected.
+
+    Updates nodes:
+      • MiniMaxH3ImageToVideo (105:104) → prompt
+      • PrimitiveFloat (105:111)        → duration (seconds)
+      • RandomNoise (105:15)            → noise_seed
+      • LoadImage (114)                 → image filename (for I2V mode)
+    """
+    wf = copy.deepcopy(workflow)
+    seed_value = seed if seed is not None and seed >= 0 else random.randint(0, 2**48)
+
+    for node in wf.values():
+        ctype = node.get("class_type", "")
+        inputs = node.get("inputs", {})
+
+        if ctype == "MiniMaxH3ImageToVideo":
+            inputs["prompt"] = prompt
+
+        elif ctype == "PrimitiveFloat":
+            inputs["value"] = duration
+
+        elif ctype == "RandomNoise":
+            inputs["noise_seed"] = seed_value
+
+        elif ctype == "LoadImage":
+            if image is not None:
+                inputs["image"] = image
+
+    return wf
+
+
+def build_video_openai_response(
+    videos: list[dict[str, Any]],
+    created: int,
+) -> dict[str, Any]:
+    """
+    Build an OpenAI-style /v1/videos/generations response.
+
+    Each data item includes the local `path` where ComfyUI saved the video file.
+    """
+    data = []
+    for video in videos:
+        item: dict[str, Any] = {}
+        if "path" in video:
+            item["path"] = video["path"]
+        item["comfyui"] = {k: video[k] for k in ("filename", "subfolder", "type") if k in video}
+        data.append(item)
+    return {"created": created, "data": data}
 
 
 # ── Client ─────────────────────────────────────────────────────────────────
@@ -365,6 +421,47 @@ class ComfyUIClient:
         if not audios:
             raise ComfyUIError(f"Workflow {prompt_id} completed but produced no output audio")
         return audios
+
+    async def generate_video(self, workflow: dict) -> list[dict[str, Any]]:
+        """
+        Run a workflow to completion and collect video outputs.
+
+        Returns a list of video records: {"path": str, "filename": str, ...}.
+        """
+        client_id = uuid.uuid4().hex
+
+        timeout = aiohttp.ClientTimeout(total=GENERATION_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.ws_connect(f"{self.ws_url}?clientId={client_id}") as ws:
+                prompt_id = await self._submit(session, workflow, client_id)
+                await self._wait_for_completion(ws, prompt_id)
+            return await self._collect_video_results(session, prompt_id)
+
+    async def _collect_video_results(self, session: aiohttp.ClientSession, prompt_id: str) -> list[dict[str, Any]]:
+        """Fetch saved video records from /history and resolve local paths."""
+        async with session.get(f"{self.base}/history/{prompt_id}") as resp:
+            if resp.status != 200:
+                raise ComfyUIError(f"GET /history failed ({resp.status})")
+            history = await resp.json()
+
+        entry = history.get(prompt_id, {})
+        videos: list[dict[str, Any]] = []
+        for node_output in entry.get("outputs", {}).values():
+            # SaveVideo outputs under "videos" key
+            for video in node_output.get("videos", []):
+                if video.get("type") != "output":
+                    continue
+                record = dict(video)
+                if self.output_dir is not None:
+                    record["path"] = str(
+                        self.output_dir / video.get("subfolder", "") / video["filename"]
+                    )
+                videos.append(record)
+
+        if not videos:
+            raise ComfyUIError(f"Workflow {prompt_id} completed but produced no output videos")
+        return videos
+
 
 
 # ── OpenAI-style response assembly ─────────────────────────────────────────

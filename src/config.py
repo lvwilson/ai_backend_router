@@ -52,6 +52,15 @@ class MusicModel:
 
 
 @dataclass
+class VideoModel:
+    """A ComfyUI-served video model: workflow template + VRAM budget."""
+    name: str
+    backend: str            # Name of the comfyui backend that serves it
+    workflow: str           # Path to workflow JSON (ComfyUI API format)
+    vram_gb: float
+
+
+@dataclass
 class RouterConfig:
     host: str = "0.0.0.0"
     port: int = 8000
@@ -69,6 +78,7 @@ class RouterConfig:
     embedding_backends: list[str] = field(default_factory=list) # llama backends with --embedding
     image_models: dict[str, ImageModel] = field(default_factory=dict)
     music_models: dict[str, MusicModel] = field(default_factory=dict)
+    video_models: dict[str, VideoModel] = field(default_factory=dict)
     comfyui_output_dirs: dict[str, str] = field(default_factory=dict)  # backend → output dir
     backend_ports: dict[str, int] = field(default_factory=dict)
 
@@ -117,6 +127,17 @@ class RouterConfig:
         if not self.music_models:
             raise KeyError("No music models configured")
         return next(iter(self.music_models.values()))  # Default: first configured
+
+    def resolve_video_model(self, model: str | None) -> VideoModel:
+        """Map a request's `model` field to a video model (case-insensitive)."""
+        if model is not None:
+            model_lower = model.lower()
+            for key, video_model in self.video_models.items():
+                if key.lower() == model_lower:
+                    return video_model
+        if not self.video_models:
+            raise KeyError("No video models configured")
+        return next(iter(self.video_models.values()))  # Default: first configured
 
     def resolve_embedding(self, model: str | None) -> str:
         """Map a request's `model` field to an embedding backend name (case-insensitive)."""
@@ -276,6 +297,13 @@ def load_config(path: str | Path) -> RouterConfig:
                 )
             for model_name, mspec in spec.get("music_models", {}).items():
                 cfg.music_models[model_name] = MusicModel(
+                    name=model_name,
+                    backend=name,
+                    workflow=_p(mspec["workflow"]),
+                    vram_gb=mspec.get("vram_usage", 0.0),
+                )
+            for model_name, mspec in spec.get("video_models", {}).items():
+                cfg.video_models[model_name] = VideoModel(
                     name=model_name,
                     backend=name,
                     workflow=_p(mspec["workflow"]),

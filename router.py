@@ -12,6 +12,7 @@ Routes:
   GET  /v1/voices                → CrispASR                     [passthrough]
   POST /v1/images/generations    → ComfyUI                      [translated]
   POST /v1/music/generations     → ComfyUI                      [translated]
+  POST /v1/videos/generations    → ComfyUI                      [translated]
   GET  /v1/models                → router-level model list
   GET  /status                   → orchestrator fleet status
 
@@ -43,8 +44,10 @@ from src.comfyui import (
     ComfyUIError,
     build_music_openai_response,
     build_openai_response,
+    build_video_openai_response,
     inject_music_parameters,
     inject_parameters,
+    inject_video_parameters,
     parse_size,
 )
 from src.config import RouterConfig, load_config
@@ -386,6 +389,72 @@ def create_app(config: RouterConfig) -> FastAPI:
             created=int(time.time()),
         )
 
+    # ── Video route (translated) ─────────────────────────────────────────
+
+    @app.post("/v1/videos/generations")
+    async def videos(request: Request):
+        try:
+            req = await request.json()
+        except json.JSONDecodeError:
+            return error(400, "Invalid JSON body")
+
+        prompt = req.get("prompt")
+        if not prompt:
+            return error(400, "Missing required field: prompt")
+
+        try:
+            video_model = config.resolve_video_model(req.get("model"))
+        except KeyError as exc:
+            return error(400, str(exc))
+
+        try:
+            workflow = json.loads(Path(video_model.workflow).read_text())
+            workflow = inject_video_parameters(
+                workflow,
+                prompt=prompt,
+                duration=req.get("duration", 3.0),
+                seed=req.get("seed"),
+                image=req.get("image"),
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            return error(500, f"Workflow '{video_model.workflow}' unavailable: {exc}")
+        except ComfyUIError as exc:
+            return error(400, str(exc))
+
+        # Launch/reuse ComfyUI with room for this specific model's VRAM.
+        try:
+            loader = await orch.ensure_running(video_model.backend, extra_vram_gb=video_model.vram_gb)
+        except InsufficientVRAMError as exc:
+            return error(507, str(exc))
+        except (KeyError, RuntimeError) as exc:
+            return error(503, str(exc))
+
+        client = ComfyUIClient(
+            port=loader.config.port,
+            output_dir=config.comfyui_output_dirs.get(video_model.backend),
+        )
+        t0 = time.monotonic()
+        try:
+            results = await client.generate_video(workflow)
+            elapsed = time.monotonic() - t0
+            logger.info("Video generation completed in %.1fs", elapsed)
+        except ComfyUIError as exc:
+            elapsed = time.monotonic() - t0
+            logger.error("Video generation failed after %.1fs: %s", elapsed, exc)
+            return error(502, f"Video generation failed: {exc}")
+        except aiohttp.ClientError as exc:
+            elapsed = time.monotonic() - t0
+            logger.error("Video generation unreachable after %.1fs: %s", elapsed, exc)
+            return error(503, f"ComfyUI unreachable: {exc}")
+
+        # Model is now resident in the warm ComfyUI process — track its VRAM.
+        orch.note_extra_vram(video_model.backend, video_model.vram_gb)
+
+        return build_video_openai_response(
+            results,
+            created=int(time.time()),
+        )
+
     # ── Ops routes ───────────────────────────────────────────────────────
 
     @app.get("/")
@@ -446,6 +515,7 @@ def create_app(config: RouterConfig) -> FastAPI:
         data += [{"id": n, "object": "model", "owned_by": "llama", "type": "embedding"} for n in config.embedding_backends]
         data += [{"id": n, "object": "model", "owned_by": "comfyui"} for n in config.image_models]
         data += [{"id": n, "object": "model", "owned_by": "comfyui", "type": "music"} for n in config.music_models]
+        data += [{"id": n, "object": "model", "owned_by": "comfyui", "type": "video"} for n in config.video_models]
         return {"object": "list", "data": data}
 
     @app.get("/status")
