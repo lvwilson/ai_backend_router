@@ -213,15 +213,19 @@ def inject_video_parameters(
     duration: float = 3.0,
     seed: int | None = None,
     image: str | None = None,
+    megapixels: float | None = None,
+    width: int | None = None,
+    height: int | None = None,
 ) -> dict:
     """
     Return a copy of the MiniMax H3 video workflow with request parameters injected.
 
     Updates nodes:
-      • MiniMaxH3ImageToVideo (105:104) → prompt
+      • MiniMaxH3ImageToVideo (105:104) → prompt, width, height (T2V mode)
       • PrimitiveFloat (105:111)        → duration (seconds)
       • RandomNoise (105:15)            → noise_seed
       • LoadImage (114)                 → image filename (for I2V mode)
+      • ImageScaleToTotalPixels (119)   → megapixels (for I2V mode)
     """
     wf = copy.deepcopy(workflow)
     seed_value = seed if seed is not None and seed >= 0 else random.randint(0, 2**48)
@@ -232,6 +236,11 @@ def inject_video_parameters(
 
         if ctype == "MiniMaxH3ImageToVideo":
             inputs["prompt"] = prompt
+            # For T2V: width/height are scalar values (not links)
+            if width is not None and not isinstance(inputs.get("width"), list):
+                inputs["width"] = width
+            if height is not None and not isinstance(inputs.get("height"), list):
+                inputs["height"] = height
 
         elif ctype == "PrimitiveFloat":
             inputs["value"] = duration
@@ -242,6 +251,10 @@ def inject_video_parameters(
         elif ctype == "LoadImage":
             if image is not None:
                 inputs["image"] = image
+
+        elif ctype == "ImageScaleToTotalPixels":
+            if megapixels is not None:
+                inputs["megapixels"] = megapixels
 
     return wf
 

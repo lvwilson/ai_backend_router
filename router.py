@@ -396,7 +396,11 @@ def create_app(config: RouterConfig) -> FastAPI:
     _VIDEO_GUIDE_PATH = Path(__file__).parent / "untracked" / "minimax_h3_guide.md"
     _VIDEO_GUIDE = _VIDEO_GUIDE_PATH.read_text() if _VIDEO_GUIDE_PATH.exists() else ""
 
-    async def _do_video_generation(req: dict, prompt: str) -> JSONResponse | StreamingResponse:
+    async def _do_video_generation(
+        req: dict,
+        prompt: str,
+        image_filename: str | None = None,
+    ) -> JSONResponse | StreamingResponse:
         """Core video generation: inject params, run ComfyUI workflow, return response."""
         try:
             video_model = config.resolve_video_model(req.get("model"))
@@ -410,7 +414,10 @@ def create_app(config: RouterConfig) -> FastAPI:
                 prompt=prompt,
                 duration=req.get("duration", 3.0),
                 seed=req.get("seed"),
-                image=req.get("image"),
+                image=image_filename,
+                megapixels=req.get("megapixels"),
+                width=req.get("width"),
+                height=req.get("height"),
             )
         except (OSError, json.JSONDecodeError) as exc:
             return error(500, f"Workflow '{video_model.workflow}' unavailable: {exc}")
@@ -447,17 +454,58 @@ def create_app(config: RouterConfig) -> FastAPI:
 
     @app.post("/v1/videos/generations")
     async def videos(request: Request):
-        """Raw video generation — prompt sent directly to ComfyUI (no LLM augmentation)."""
-        try:
-            req = await request.json()
-        except json.JSONDecodeError:
-            return error(400, "Invalid JSON body")
+        """Raw video generation — prompt sent directly to ComfyUI (no LLM augmentation).
+        
+        Accepts either JSON body or multipart form-data.
+        For multipart: fields are 'prompt', 'model', 'duration', 'seed', 'megapixels',
+        'width', 'height', and 'image_file' (uploaded image for I2V).
+        For JSON: 'image' field specifies a filename already in ComfyUI input dir.
+        """
+        content_type = request.headers.get("content-type", "")
 
-        prompt = req.get("prompt")
-        if not prompt:
-            return error(400, "Missing required field: prompt")
+        if "multipart/form-data" in content_type:
+            # Multipart form-data with potential file upload
+            form = await request.form()
+            prompt = form.get("prompt")
+            if not prompt:
+                return error(400, "Missing required field: prompt")
 
-        return await _do_video_generation(req, prompt)
+            req = {
+                "model": form.get("model"),
+                "duration": float(form["duration"]) if form.get("duration") else None,
+                "seed": int(form["seed"]) if form.get("seed") else None,
+                "megapixels": float(form["megapixels"]) if form.get("megapixels") else None,
+                "width": int(form["width"]) if form.get("width") else None,
+                "height": int(form["height"]) if form.get("height") else None,
+            }
+
+            # Handle uploaded image file
+            image_file = form.get("image_file")
+            image_filename = None
+            if image_file and hasattr(image_file, "filename") and image_file.filename:
+                # Save uploaded file to ComfyUI input directory
+                video_model = config.resolve_video_model(req.get("model"))
+                comfyui_output_dir = config.comfyui_output_dirs.get(video_model.backend)
+                if comfyui_output_dir:
+                    input_dir = Path(comfyui_output_dir).parent / "input"
+                    input_dir.mkdir(parents=True, exist_ok=True)
+                    image_filename = image_file.filename
+                    dest = input_dir / image_filename
+                    dest.write_bytes(await image_file.read())
+                    logger.info("Saved uploaded image to %s", dest)
+        else:
+            try:
+                req = await request.json()
+            except json.JSONDecodeError:
+                return error(400, "Invalid JSON body")
+
+            prompt = req.get("prompt")
+            if not prompt:
+                return error(400, "Missing required field: prompt")
+
+            image_filename = req.get("image")
+
+        return await _do_video_generation(req, prompt, image_filename)
 
     @app.post("/v1/videos/generations/augmented")
     async def videos_augmented(request: Request):
@@ -465,15 +513,53 @@ def create_app(config: RouterConfig) -> FastAPI:
         Augmented video generation — prompt first enriched by an LLM call
         (qwen3.6-27b-instruct) using the MiniMax H3 prompt-writing guide,
         then sent to ComfyUI for generation.
+        
+        Accepts either JSON body or multipart form-data.
+        For multipart: fields are 'prompt', 'model', 'duration', 'seed', 'megapixels',
+        'width', 'height', and 'image_file' (uploaded image for I2V).
+        For JSON: 'image' field specifies a filename already in ComfyUI input dir.
         """
-        try:
-            req = await request.json()
-        except json.JSONDecodeError:
-            return error(400, "Invalid JSON body")
+        content_type = request.headers.get("content-type", "")
+        image_filename = None
 
-        prompt = req.get("prompt")
-        if not prompt:
-            return error(400, "Missing required field: prompt")
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            prompt = form.get("prompt")
+            if not prompt:
+                return error(400, "Missing required field: prompt")
+
+            req = {
+                "model": form.get("model"),
+                "duration": float(form["duration"]) if form.get("duration") else None,
+                "seed": int(form["seed"]) if form.get("seed") else None,
+                "megapixels": float(form["megapixels"]) if form.get("megapixels") else None,
+                "width": int(form["width"]) if form.get("width") else None,
+                "height": int(form["height"]) if form.get("height") else None,
+            }
+
+            # Handle uploaded image file
+            image_file = form.get("image_file")
+            if image_file and hasattr(image_file, "filename") and image_file.filename:
+                video_model = config.resolve_video_model(req.get("model"))
+                comfyui_output_dir = config.comfyui_output_dirs.get(video_model.backend)
+                if comfyui_output_dir:
+                    input_dir = Path(comfyui_output_dir).parent / "input"
+                    input_dir.mkdir(parents=True, exist_ok=True)
+                    image_filename = image_file.filename
+                    dest = input_dir / image_filename
+                    dest.write_bytes(await image_file.read())
+                    logger.info("Saved uploaded image to %s", dest)
+        else:
+            try:
+                req = await request.json()
+            except json.JSONDecodeError:
+                return error(400, "Invalid JSON body")
+
+            prompt = req.get("prompt")
+            if not prompt:
+                return error(400, "Missing required field: prompt")
+
+            image_filename = req.get("image")
 
         # Resolve model to determine mode (T2VA vs I2VA).
         try:
@@ -540,7 +626,7 @@ def create_app(config: RouterConfig) -> FastAPI:
 
         logger.info("Augmented video prompt (%d chars): %.200s…", len(augmented_prompt), augmented_prompt)
 
-        return await _do_video_generation(req, augmented_prompt)
+        return await _do_video_generation(req, augmented_prompt, image_filename)
 
     # ── Ops routes ───────────────────────────────────────────────────────
 

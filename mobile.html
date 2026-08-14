@@ -456,23 +456,31 @@ const ENDPOINTS = [
       {
         id: "video", method: "POST", path: "/v1/videos/generations",
         desc: "Generate video via ComfyUI (raw)",
+        is_video: true,
         fields: [
           { name: "model", type: "select", label: "Model", options: "video", default: "minimax_h3_t2v_turbo" },
           { name: "prompt", type: "textarea", label: "Prompt", default: "A curious monkey on a tropical beach eating a banana" },
           { name: "duration", type: "number", label: "Duration (s)", default: 3 },
           { name: "seed", type: "number", label: "Seed (optional)", default: "" },
-          { name: "image", type: "text", label: "Image (I2V only)", default: "" },
+          { name: "image_file", type: "file", label: "First Frame Image (I2V only)", accept: "image/*", video_field: "i2v" },
+          { name: "megapixels", type: "number", label: "Megapixels (I2V)", default: "0.4", video_field: "i2v" },
+          { name: "width", type: "number", label: "Width (T2V)", default: "832", video_field: "t2v" },
+          { name: "height", type: "number", label: "Height (T2V)", default: "480", video_field: "t2v" },
         ]
       },
       {
         id: "video-augmented", method: "POST", path: "/v1/videos/generations/augmented",
         desc: "Generate video (LLM-augmented)",
+        is_video: true,
         fields: [
           { name: "model", type: "select", label: "Model", options: "video", default: "minimax_h3_t2v_turbo" },
           { name: "prompt", type: "textarea", label: "Brief Idea", default: "monkey eats banana" },
           { name: "duration", type: "number", label: "Duration (s)", default: 3 },
           { name: "seed", type: "number", label: "Seed (optional)", default: "" },
-          { name: "image", type: "text", label: "Image (I2V only)", default: "" },
+          { name: "image_file", type: "file", label: "First Frame Image (I2V only)", accept: "image/*", video_field: "i2v" },
+          { name: "megapixels", type: "number", label: "Megapixels (I2V)", default: "0.4", video_field: "i2v" },
+          { name: "width", type: "number", label: "Width (T2V)", default: "832", video_field: "t2v" },
+          { name: "height", type: "number", label: "Height (T2V)", default: "480", video_field: "t2v" },
         ]
       },
     ]
@@ -571,7 +579,11 @@ function renderCardBody(epId) {
   if (ep.fields) {
     for (const f of ep.fields) {
       const val = f.default !== undefined ? f.default : "";
-      html += `<div class="field"><label>${f.label}</label>`;
+      let visibilityAttr = "";
+      if (f.video_field) {
+        visibilityAttr = ` data-video-field="${f.video_field}"`;
+      }
+      html += `<div class="field"${visibilityAttr}><label>${f.label}</label>`;
       if (f.type === "textarea") {
         html += `<textarea id="f_${epId}_${f.name}">${escHtml(String(val))}</textarea>`;
       } else if (f.type === "select") {
@@ -590,6 +602,31 @@ function renderCardBody(epId) {
   html += `<div class="response-area" id="resp-${epId}" style="display:none"><div class="response-header"><span class="status" id="respStatus-${epId}"></span><span id="respMeta-${epId}"></span></div><div class="response-body" id="respBody-${epId}"></div></div>`;
   body.innerHTML = html;
   populateSelects(ep, epId);
+  if (ep.is_video) {
+    setupMobileVideoFields(ep, epId);
+  }
+}
+
+function setupMobileVideoFields(ep, epId) {
+  const modelSelect = document.getElementById(`f_${epId}_model`);
+  if (!modelSelect) return;
+
+  function updateVisibility() {
+    const model = modelSelect.value || "";
+    const isI2V = model.includes("i2v");
+    const body = document.getElementById("body-" + epId);
+    body.querySelectorAll("[data-video-field]").forEach(el => {
+      const vf = el.dataset.videoField;
+      if (vf === "i2v") {
+        el.style.display = isI2V ? "" : "none";
+      } else if (vf === "t2v") {
+        el.style.display = !isI2V ? "" : "none";
+      }
+    });
+  }
+
+  modelSelect.addEventListener("change", updateVisibility);
+  updateVisibility(); // Initial state
 }
 
 function populateSelects(ep, epId) {
@@ -700,9 +737,24 @@ async function sendRequest(epId) {
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
       showMusicResponse(r, elapsed, respStatus, respMeta, respBody, base);
     } else if (ep.id === "video" || ep.id === "video-augmented") {
-      const body = buildBody(ep, epId);
+      const fd = new FormData();
+      for (const f of ep.fields) {
+        if (f.type === "checkbox") {
+          const checked = document.getElementById(`f_${epId}_${f.name}`).checked;
+          if (checked) fd.append(f.name, "true");
+        } else if (f.type === "file") {
+          const fileInput = document.getElementById(`f_${epId}_${f.name}`);
+          if (fileInput.files.length > 0) {
+            fd.append(f.name, fileInput.files[0]);
+          }
+        } else {
+          const el = document.getElementById(`f_${epId}_${f.name}`);
+          const v = el.value;
+          if (v !== "") fd.append(f.name, v);
+        }
+      }
       const r = await fetch(`${base}${ep.path}`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        method: "POST", body: fd,
       });
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
       showVideoResponse(r, elapsed, respStatus, respMeta, respBody, base);
