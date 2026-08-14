@@ -590,13 +590,44 @@ def create_app(config: RouterConfig) -> FastAPI:
             f"- The video duration is {req.get('duration', 3.0)} seconds.\n"
         )
 
-        user_msg = f"Create a {mode_label} video from this idea:\n\n{prompt}"
+        # For I2V, include the image in the LLM context so it can analyze the
+        # first frame and write a more accurate, image-aware prompt.
+        if is_i2v and image_filename:
+            import base64 as b64
+            comfyui_output_dir = config.comfyui_output_dirs.get(video_model.backend)
+            if comfyui_output_dir:
+                input_dir = Path(comfyui_output_dir).parent / "input"
+                image_path = input_dir / image_filename
+                if image_path.is_file():
+                    image_bytes = image_path.read_bytes()
+                    image_b64 = b64.b64encode(image_bytes).decode("ascii")
+                    # Determine MIME type from extension
+                    ext = image_path.suffix.lower()
+                    mime_map = {
+                        ".png": "image/png", ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg", ".webp": "image/webp",
+                        ".gif": "image/gif",
+                    }
+                    mime_type = mime_map.get(ext, "image/png")
+                    data_uri = f"data:{mime_type};base64,{image_b64}"
+
+                    user_content = [
+                        {"type": "text", "text": f"Create a {mode_label} video from this idea:\n\n{prompt}"},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ]
+                    logger.info("I2V augmented: passing image to LLM (%s, %d bytes base64)", image_filename, len(image_b64))
+                else:
+                    user_content = f"Create a {mode_label} video from this idea:\n\n{prompt}"
+            else:
+                user_content = f"Create a {mode_label} video from this idea:\n\n{prompt}"
+        else:
+            user_content = f"Create a {mode_label} video from this idea:\n\n{prompt}"
 
         llm_request = {
             "model": augment_backend,
             "messages": [
                 {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
+                {"role": "user", "content": user_content},
             ],
             "temperature": 1.0,
             "max_tokens": 1024,
