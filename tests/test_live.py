@@ -343,3 +343,120 @@ class TestLiveEndpoints:
         r = live_client.post("/v1/models/unload-all")
         assert r.status_code == 200
         assert "unloaded" in r.json()
+
+
+# ── Live request-queuing tests (concurrency 1 per model) ───────────────────
+#
+# These validate the core guarantee that a new request queues behind a running
+# one instead of killing it:
+#   • A second request for a busy model waits its turn (both complete).
+#   • The router never evicts a backend that has a request in flight — a
+#     competing request that would need to free its VRAM waits for the
+#     in-flight request to finish, and the in-flight request still completes.
+#
+# They need a live router with the real (large) backends so VRAM pressure is
+# genuine. Run after restarting the router to pick up the new code.
+
+import concurrent.futures
+
+
+class TestLiveQueuing:
+    """Live tests for per-model concurrency-1 request queuing."""
+
+    def test_status_reports_busy_backends(self, live_client):
+        """GET /status exposes the new busy_backends field (list)."""
+        r = live_client.get("/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert "busy_backends" in data, f"keys={list(data.keys())}"
+        assert isinstance(data["busy_backends"], list)
+
+    def test_same_model_serialization(self, live_client):
+        """
+        Two concurrent requests to the SAME model both complete (the second
+        waits its turn rather than running concurrently and corrupting state).
+        """
+        model = "qwen3.6-27b-instruct"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Count from 1 to 10, one number per line."}],
+            "max_tokens": 120,
+            "stream": False,
+        }
+
+        def do_request():
+            r = live_client.post("/v1/chat/completions", json=payload)
+            return r
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            futs = [ex.submit(do_request) for _ in range(2)]
+            results = [f.result() for f in futs]
+
+        for i, r in enumerate(results):
+            assert 200 <= r.status_code < 300, f"request {i}: status={r.status_code} body={r.text[:200]}"
+            content = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            assert len(content) > 0, f"request {i}: empty content"
+
+    @pytest.mark.timeout(600)
+    def test_inflight_request_not_evicted(self, live_client):
+        """
+        Core guarantee: a competing request that would need to evict a busy
+        backend WAITS for the in-flight request to finish — the in-flight
+        request still completes (is not killed).
+
+        Setup: A = qwen3.6-27b-instruct (~43 GB) generating. B =
+        nanbeige4.2-3b (~16 GB). 43 + 16 > 48 GB, so B cannot fit while A is
+        resident — B must free A's VRAM. With the fix, B waits for A to drain
+        instead of evicting A mid-request, and A completes successfully.
+        """
+        model_a = "qwen3.6-27b-instruct"   # big — resident while A runs
+        model_b = "nanbeige4.2-3b"         # needs to evict A to fit
+
+        payload_a = {
+            "model": model_a,
+            "messages": [{"role": "user", "content": "Write a short 3-sentence poem about the sea."}],
+            "max_tokens": 200,
+            "stream": False,
+        }
+        payload_b = {
+            "model": model_b,
+            "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+            "max_tokens": 10,
+            "stream": False,
+        }
+
+        # Fire A in the background.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut_a = ex.submit(live_client.post, "/v1/chat/completions", json=payload_a)
+
+            # Wait until A is confirmed in-flight (busy) so B arrives while A runs.
+            deadline = time.time() + 120
+            saw_busy = False
+            while time.time() < deadline:
+                try:
+                    s = live_client.get("/status")
+                    if s.status_code == 200 and model_a in s.json().get("busy_backends", []):
+                        saw_busy = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+
+            # B arrives while A is (or was just) in flight. B cannot fit without
+            # evicting A, so it must wait for A to drain — not kill A.
+            t0 = time.time()
+            r_b = live_client.post("/v1/chat/completions", json=payload_b)
+            b_elapsed = time.time() - t0
+
+            # A must complete successfully (not evicted mid-request).
+            r_a = fut_a.result()
+
+        assert r_a.status_code == 200, f"A (in-flight) failed: status={r_a.status_code} body={r_a.text[:300]}"
+        content_a = r_a.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+        assert len(content_a) > 0, f"A (in-flight) returned empty content — likely evicted: {r_a.text[:200]}"
+
+        assert r_b.status_code == 200, f"B (competing) failed: status={r_b.status_code} body={r_b.text[:300]}"
+        content_b = r_b.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+        assert len(content_b) > 0, f"B (competing) returned empty content"
+
+        print(f"\n[queuing] A in-flight confirmed busy={saw_busy}; B waited {b_elapsed:.1f}s; both completed")

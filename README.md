@@ -7,6 +7,7 @@ A FastAPI-based router that provides a **unified OpenAI-compatible API** over mu
 - **Launches backends on demand** — llama.cpp, CrispASR, and ComfyUI start automatically when first requested.
 - **Keeps them warm** — backends stay running for fast reuse instead of cold-starting on every request.
 - **Evicts under VRAM pressure** — when a large model won't fit, the smallest running backend is evicted first (smallest-first eviction), with real `nvidia-smi` confirmation.
+- **Queues requests (concurrency 1 per model)** — a new request for a busy model waits its turn instead of running concurrently, and the router never evicts a backend that has a request in flight. A new request can therefore never kill a previous one.
 - **Translates APIs** — ComfyUI's proprietary workflow API is translated to/from OpenAI `/v1/images/generations` format automatically.
 
 ### Supported backends
@@ -130,6 +131,27 @@ When a backend is requested and there isn't enough free VRAM:
 5. The requested backend is launched and warmed up.
 
 A configurable `vram_reserve` (default 2 GB) is always kept free for the OS/compositor.
+
+## Request queuing (concurrency 1 per model)
+
+Each backend has a concurrency-1 "request slot". A request holds that slot for
+the full duration of its work (including the streamed response body for LLM
+routes), which marks the backend **busy**. This gives two guarantees:
+
+- **A second request for the same model waits its turn** rather than running
+  concurrently — it is serialized behind the in-flight one.
+- **The router never evicts a busy backend.** If a new request would otherwise
+  need to free VRAM by evicting a backend that still has a request in flight,
+  it *waits for that request to finish* and then proceeds — instead of killing
+  the in-flight request.
+
+The wait for a busy backend to drain happens outside the orchestrator lock, so
+unrelated backends are not blocked while it waits. `GET /status` reports which
+backends are currently busy under `busy_backends`.
+
+> Concurrency is fixed at 1 per model for simplicity. Raising it later would
+> mean allowing N in-flight requests per backend and evicting only when fewer
+> than N are busy.
 
 ## Architecture
 
