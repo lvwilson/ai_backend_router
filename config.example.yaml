@@ -94,3 +94,26 @@ backends:
       minimax_music_3:
         workflow: ~/projectnotes/workflows/audio_minimax_music_3.json
         vram_usage: 25
+
+  # ── ComfyUI (video) — dedicated instance launched with --fp16-unet.
+  # --fp16-unet is a process-level flag, so video models get their own ComfyUI
+  # instance to force fp16 UNet precision on every video pathway (T2V + I2V)
+  # without changing the image/music instance's precision.
+  video:
+    type: comfyui
+    venv: ~/ComfyUI/venv/bin/python
+    working_dir: ~/ComfyUI
+    main: main.py
+    port: 8189
+    vram_usage: 1         # The ComfyUI process itself
+    output_dir: ~/ComfyUI/output
+    retries: 1
+    extra_args:
+      - "--fp16-unet"
+    video_models:
+      minimax_h3_t2v_turbo:
+        workflow: ~/projectnotes/workflows/minimax_h3_t2v_turbo.json
+        vram_usage: 40
+      minimax_h3_i2v_turbo:
+        workflow: ~/projectnotes/workflows/minimax_h3_i2v_turbo.json
+        vram_usage: 40
