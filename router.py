@@ -155,21 +155,27 @@ def create_app(config: RouterConfig) -> FastAPI:
             await orch.release_slot(backend_name)
             return error(503, str(exc))
 
-        port = loader.config.port
-        url = f"http://127.0.0.1:{port}{request.url.path}"
-        if request.url.query:
-            url += f"?{request.url.query}"
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS}
-        if body is None:
-            body = await request.body()
-
-        http: aiohttp.ClientSession = app.state.http
         try:
+            port = loader.config.port
+            url = f"http://127.0.0.1:{port}{request.url.path}"
+            if request.url.query:
+                url += f"?{request.url.query}"
+            headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS}
+            if body is None:
+                body = await request.body()
+
+            http: aiohttp.ClientSession = app.state.http
             resp = await http.request(request.method, url, data=body, headers=headers)
         except aiohttp.ClientError as exc:
             logger.error("[%s] Backend request failed: %s", backend_name, exc)
             await orch.release_slot(backend_name)
             return error(503, f"Backend '{backend_name}' unreachable: {exc}")
+        except Exception as exc:
+            # Any unexpected setup failure — release the slot so this backend
+            # is not wedged, then surface a 500.
+            logger.error("[%s] Proxy setup failed: %s", backend_name, exc)
+            await orch.release_slot(backend_name)
+            return error(500, f"Proxy setup failed: {exc}")
 
         logger.debug("[%s] Backend responded: %d", backend_name, resp.status)
 
