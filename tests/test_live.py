@@ -307,6 +307,23 @@ class TestLiveEndpoints:
         imgs = data.get("data", [])
         assert len(imgs) > 0
 
+    @pytest.mark.timeout(600)
+    def test_music_generation(self, live_client):
+        """POST /v1/music/generations — ComfyUI MiniMax Music 3 (short track)."""
+        payload = {
+            "model": "minimax_music_3",
+            "tags": "lo-fi hip-hop, chill, mellow piano, vinyl crackle",
+            "duration": 20,
+        }
+        t0 = time.time()
+        r = live_client.post("/v1/music/generations", json=payload)
+        assert 200 <= r.status_code < 300, f"status={r.status_code} ({time.time()-t0:.1f}s) body={r.text[:300]}"
+        data = r.json()
+        assert "data" in data and isinstance(data["data"], list)
+        audios = data.get("data", [])
+        assert len(audios) > 0, f"no audio in response: {data}"
+        assert "path" in audios[0], f"no path in audio record: {audios[0]}"
+
     def test_error_unknown_model(self, live_client):
         """Error handling — unknown model returns 400."""
         payload = {"model": "nonexistent-model", "messages": [{"role": "user", "content": "hi"}]}

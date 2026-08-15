@@ -86,8 +86,11 @@ backends:
       krea2:
         workflow: ~/projectnotes/workflows/krea2_basic.json
         vram_usage: 14    # GB for the krea2 turbo checkpoint + VAE + CLIP
-    # Music models served via POST /v1/music/generations (Ace Step workflow).
+    # Music models served via POST /v1/music/generations.
     music_models:
       ace_step_1.5_xl_turbo:
         workflow: ~/projectnotes/workflows/audio_ace_step1_5_xl_turbo.json
         vram_usage: 28
+      minimax_music_3:
+        workflow: ~/projectnotes/workflows/audio_minimax_music_3.json
+        vram_usage: 25

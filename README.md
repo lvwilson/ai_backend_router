@@ -87,32 +87,30 @@ curl http://localhost:8000/v1/images/generations \
     "size": "1024x1024"
   }'
 
-# Music generation — launches ComfyUI, translates to Ace Step workflow
+# Music generation — launches ComfyUI, translates to the model's workflow
+# Models: ace_step_1.5_xl_turbo (28 GB) | minimax_music_3 (25 GB)
 curl http://localhost:8000/v1/music/generations \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "ace_step_1.5_xl_turbo",
+    "model": "minimax_music_3",
     "tags": "lo-fi, chill, ambient, soft piano",
     "lyrics": "[Verse]\nWalking through the garden",
-    "bpm": 90,
-    "duration": 120,
-    "keyscale": "A minor",
-    "timesignature": "4",
-    "language": "en"
+    "duration": 60
   }'
 
 Music parameters:
   • tags          — Style descriptors (genre, mood, instrumentation)
+                  (MiniMax Music 3: becomes the caption)
   • lyrics        — Structured lyrics with [Verse], [Chorus], etc.
-  • bpm           — Tempo
-  • keyscale      — Musical key (e.g. "C major", "A minor")
-  • timesignature — Meter: "4" for 4/4, "3" for 3/4, "6" for 6/8
-  • language      — Vocal language code (e.g. "en", "ja", "fr")
-  • duration      — Song length in seconds
+  • bpm           — Tempo (Ace Step only)
+  • keyscale      — Musical key (e.g. "C major", "A minor") (Ace Step only)
+  • timesignature — Meter: "4" for 4/4, "3" for 3/4, "6" for 6/8 (Ace Step only)
+  • language      — Vocal language code (e.g. "en", "ja", "fr") (Ace Step only)
+  • duration      — Song length in seconds (MiniMax Music 3: max 360 s)
   • seed          — 0 for random, or a specific integer
 
 ML-specific params (cfg_scale, temperature, top_p, etc.) have sensible
-defaults and need not be set manually.
+per-model defaults and need not be set manually.
 
 # List available models
 curl http://localhost:8000/v1/models

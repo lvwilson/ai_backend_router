@@ -429,22 +429,23 @@ const ENDPOINTS = [
     items: [
       {
         id: "music", method: "POST", path: "/v1/music/generations",
-        desc: "Generate music via ComfyUI",
+        desc: "Generate music via ComfyUI (Ace Step / MiniMax Music 3)",
+        is_music: true,
         fields: [
           { name: "model", type: "select", label: "Model", options: "music", default: "ace_step_1.5_xl_turbo" },
           { name: "tags", type: "text", label: "Tags / Style", default: "lo-fi, chill, ambient" },
           { name: "lyrics", type: "textarea", label: "Lyrics (optional)", default: "" },
           { name: "duration", type: "number", label: "Duration (s)", default: 30 },
-          { name: "bpm", type: "number", label: "BPM", default: 120 },
+          { name: "bpm", type: "number", label: "BPM", default: 120, music_field: "ace" },
           { name: "seed", type: "number", label: "Seed (0=random)", default: 0 },
-          { name: "timesignature", type: "text", label: "Time Sig", default: "4" },
-          { name: "language", type: "text", label: "Language", default: "en" },
-          { name: "keyscale", type: "text", label: "Key", default: "E minor" },
-          { name: "cfg_scale", type: "number", label: "CFG Scale", default: 2.0 },
-          { name: "temperature", type: "number", label: "Temperature", default: 0.85 },
-          { name: "top_p", type: "number", label: "Top P", default: 0.9 },
-          { name: "top_k", type: "number", label: "Top K", default: 0 },
-          { name: "min_p", type: "number", label: "Min P", default: 0.0 },
+          { name: "timesignature", type: "text", label: "Time Sig", default: "4", music_field: "ace" },
+          { name: "language", type: "text", label: "Language", default: "en", music_field: "ace" },
+          { name: "keyscale", type: "text", label: "Key", default: "E minor", music_field: "ace" },
+          { name: "cfg_scale", type: "number", label: "CFG Scale (optional)", default: "" },
+          { name: "temperature", type: "number", label: "Temperature (optional)", default: "", music_field: "ace" },
+          { name: "top_p", type: "number", label: "Top P (optional)", default: "", music_field: "ace" },
+          { name: "top_k", type: "number", label: "Top K (optional)", default: "" },
+          { name: "min_p", type: "number", label: "Min P (optional)", default: "", music_field: "ace" },
           { name: "steps", type: "number", label: "Steps (optional)", default: "" },
         ]
       },
@@ -583,6 +584,9 @@ function renderCardBody(epId) {
       if (f.video_field) {
         visibilityAttr = ` data-video-field="${f.video_field}"`;
       }
+      if (f.music_field) {
+        visibilityAttr += ` data-music-field="${f.music_field}"`;
+      }
       html += `<div class="field"${visibilityAttr}><label>${f.label}</label>`;
       if (f.type === "textarea") {
         html += `<textarea id="f_${epId}_${f.name}">${escHtml(String(val))}</textarea>`;
@@ -604,6 +608,9 @@ function renderCardBody(epId) {
   populateSelects(ep, epId);
   if (ep.is_video) {
     setupMobileVideoFields(ep, epId);
+  }
+  if (ep.is_music) {
+    setupMobileMusicFields(ep, epId);
   }
 }
 
@@ -629,6 +636,26 @@ function setupMobileVideoFields(ep, epId) {
   updateVisibility(); // Initial state
 }
 
+function setupMobileMusicFields(ep, epId) {
+  const modelSelect = document.getElementById(`f_${epId}_model`);
+  if (!modelSelect) return;
+
+  function updateVisibility() {
+    const model = modelSelect.value || "";
+    const isAce = model.includes("ace");
+    const body = document.getElementById("body-" + epId);
+    body.querySelectorAll("[data-music-field]").forEach(el => {
+      const mf = el.dataset.musicField;
+      if (mf === "ace") {
+        el.style.display = isAce ? "" : "none";
+      }
+    });
+  }
+
+  modelSelect.addEventListener("change", updateVisibility);
+  updateVisibility(); // Initial state
+}
+
 function populateSelects(ep, epId) {
   if (!ep.fields) return;
   for (const f of ep.fields) {
@@ -644,6 +671,7 @@ function populateSelects(ep, epId) {
     }
     const def = f.default || (list[0] || "");
     sel.value = def;
+    sel.dispatchEvent(new Event("change")); // Refresh model-dependent field visibility
   }
 }
 

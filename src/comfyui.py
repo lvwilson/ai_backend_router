@@ -120,32 +120,53 @@ def parse_size(size: str | None) -> tuple[int | None, int | None]:
         raise ComfyUIError(f"Invalid size '{size}' — expected WIDTHxHEIGHT")
 
 
+# MiniMax Music 3 hard limit: MAX_AUDIO_FRAMES (9000) / 25 fps = 360 s.
+MINIMAX_MUSIC_MAX_DURATION = 360.0
+
+
 def inject_music_parameters(
     workflow: dict,
-    tags: str,
-    lyrics: str,
-    duration: int = 144,
-    bpm: int = 120,
+    tags: str | None = None,
+    lyrics: str | None = None,
+    duration: float | None = None,
+    bpm: int | None = None,
     seed: int | None = None,
-    timesignature: str = "4",
-    language: str = "en",
-    keyscale: str = "E minor",
-    cfg_scale: float = 2.0,
-    temperature: float = 0.85,
-    top_p: float = 0.9,
-    top_k: int = 0,
-    min_p: float = 0.0,
+    timesignature: str | None = None,
+    language: str | None = None,
+    keyscale: str | None = None,
+    cfg_scale: float | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    min_p: float | None = None,
     steps: int | None = None,
     cfg: float | None = None,
 ) -> dict:
     """
-    Return a copy of the Ace Step music workflow with request parameters injected.
+    Return a copy of a music workflow with request parameters injected.
 
-    Updates nodes:
-      • KSampler (3)       → seed, steps, cfg
-      • PrimitiveInt (109) → seed value (shared seed source)
-      • TextEncodeAceStepAudio1.5 (94) → tags, lyrics, seed, bpm, duration, timesignature, language, keyscale, cfg_scale, temperature, top_p, top_k, min_p
+    Supports both music model families:
+
+    Ace Step 1.5 (workflows/audio_ace_step1_5_xl_turbo.json):
+      • KSampler (3)                    → steps, cfg
+      • PrimitiveInt (109)              → seed value (shared seed source)
+      • TextEncodeAceStepAudio1.5 (94)  → tags, lyrics, bpm, duration,
+                                          timesignature, language, keyscale,
+                                          cfg_scale, temperature, top_p,
+                                          top_k, min_p
       • EmptyAceStep1.5LatentAudio (98) → seconds (duration)
+
+    MiniMax Music 3 (workflows/audio_minimax_music_3.json):
+      • SeedNode (37:38)                → seed value (shared seed source)
+      • MiniMaxMusic3TextEncode (37:13) → caption (tags), lyrics,
+                                          max_duration (duration),
+                                          cfg_scale, top_k
+      • KSampler (37:9)                 → steps, cfg
+      The latent's `seconds` is a link to the text encoder's scheduled
+      duration output, so it adapts automatically.
+
+    Parameters left as None keep the workflow template's own values, so
+    each model runs with its tuned defaults unless the caller overrides.
     """
     wf = copy.deepcopy(workflow)
     # Music workflow convention: 0 (or a negative value) means "random".
@@ -157,35 +178,57 @@ def inject_music_parameters(
 
         if ctype == "KSampler":
             # seed is a link [node_id, slot] — don't change the slot index,
-            # the actual value comes from the linked PrimitiveInt node.
+            # the actual value comes from the linked seed-source node.
             if steps is not None:
                 inputs["steps"] = steps
             if cfg is not None:
                 inputs["cfg"] = cfg
 
         elif ctype == "PrimitiveInt":
-            # The shared seed source node — set the actual seed value here.
+            # Ace Step shared seed source node — set the actual seed value here.
             inputs["value"] = seed_value
+
+        elif ctype == "SeedNode":
+            # MiniMax Music 3 shared seed source node.
+            inputs["seed"] = seed_value
 
         elif ctype == "TextEncodeAceStepAudio1.5":
             if tags is not None:
                 inputs["tags"] = tags
             if lyrics is not None:
                 inputs["lyrics"] = lyrics
-            inputs["bpm"] = bpm
-            inputs["duration"] = duration
-            inputs["timesignature"] = timesignature
-            inputs["language"] = language
-            inputs["keyscale"] = keyscale
-            inputs["cfg_scale"] = cfg_scale
-            inputs["temperature"] = temperature
-            inputs["top_p"] = top_p
-            inputs["top_k"] = top_k
-            inputs["min_p"] = min_p
+            inputs["bpm"] = bpm if bpm is not None else 120
+            inputs["duration"] = duration if duration is not None else 144
+            inputs["timesignature"] = timesignature if timesignature is not None else "4"
+            inputs["language"] = language if language is not None else "en"
+            inputs["keyscale"] = keyscale if keyscale is not None else "E minor"
+            inputs["cfg_scale"] = cfg_scale if cfg_scale is not None else 2.0
+            inputs["temperature"] = temperature if temperature is not None else 0.85
+            inputs["top_p"] = top_p if top_p is not None else 0.9
+            inputs["top_k"] = top_k if top_k is not None else 0
+            inputs["min_p"] = min_p if min_p is not None else 0.0
             # seed is a link [node_id, slot] — leave it, value comes from PrimitiveInt
 
         elif ctype == "EmptyAceStep1.5LatentAudio":
-            inputs["seconds"] = duration
+            inputs["seconds"] = duration if duration is not None else 144
+
+        elif ctype == "MiniMaxMusic3TextEncode":
+            # seed is a link [node_id, slot] — leave it, value comes from SeedNode.
+            if tags is not None:
+                inputs["caption"] = tags
+            if lyrics is not None:
+                inputs["lyrics"] = lyrics
+            if duration is not None:
+                if duration > MINIMAX_MUSIC_MAX_DURATION:
+                    raise ComfyUIError(
+                        f"duration {duration}s exceeds the MiniMax Music 3 "
+                        f"maximum of {MINIMAX_MUSIC_MAX_DURATION:.0f}s"
+                    )
+                inputs["max_duration"] = duration
+            if cfg_scale is not None:
+                inputs["cfg_scale"] = cfg_scale
+            if top_k is not None:
+                inputs["top_k"] = top_k
 
     return wf
 

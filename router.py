@@ -333,21 +333,24 @@ def create_app(config: RouterConfig) -> FastAPI:
 
         try:
             workflow = json.loads(Path(music_model.workflow).read_text())
+            # Omitted params stay None → the workflow template's own tuned
+            # defaults are kept (per-model, e.g. MiniMax Music 3: 60 s,
+            # cfg_scale 1.7, top_k 50).
             workflow = inject_music_parameters(
                 workflow,
                 tags=tags,
                 lyrics=lyrics,
-                duration=req.get("duration", 144),
-                bpm=req.get("bpm", 120),
+                duration=req.get("duration"),
+                bpm=req.get("bpm"),
                 seed=req.get("seed"),
-                timesignature=req.get("timesignature", "4"),
-                language=req.get("language", "en"),
-                keyscale=req.get("keyscale", "E minor"),
-                cfg_scale=req.get("cfg_scale", 2.0),
-                temperature=req.get("temperature", 0.85),
-                top_p=req.get("top_p", 0.9),
-                top_k=req.get("top_k", 0),
-                min_p=req.get("min_p", 0.0),
+                timesignature=req.get("timesignature"),
+                language=req.get("language"),
+                keyscale=req.get("keyscale"),
+                cfg_scale=req.get("cfg_scale"),
+                temperature=req.get("temperature"),
+                top_p=req.get("top_p"),
+                top_k=req.get("top_k"),
+                min_p=req.get("min_p"),
                 steps=req.get("steps"),
                 cfg=req.get("cfg"),
             )
