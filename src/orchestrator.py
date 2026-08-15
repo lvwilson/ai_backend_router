@@ -14,6 +14,22 @@ router workflow:
 Warm-by-default: backends are never stopped except under VRAM pressure
 or on shutdown().
 
+Concurrency model (concurrency 1 per backend):
+  Each backend has a concurrency-1 "request slot". A request acquires the
+  slot for the backend it targets for its full duration (see request_slot),
+  which marks the backend "busy". Two consequences:
+
+    • A second request for the same backend *waits its turn* (the slot is a
+      semaphore) rather than running concurrently.
+    • _make_room never evicts a busy backend — a new request that would
+      otherwise need to kill an in-flight one instead *waits for the
+      in-flight request to finish* (ensure_running → _BusyBlock) and then
+      proceeds.
+
+  This is what makes "a new request" queue behind "a previous one" instead
+  of killing it. The wait for a busy backend to drain happens *outside* the
+  orchestrator lock, so unrelated backends are not blocked while we wait.
+
 VRAM accounting uses nvidia-smi --query-compute-apps for authoritative
 per-process readings. If nvidia-smi is unavailable, falls back to
 tracked bookkeeping (sum of declared/measured values).
@@ -26,6 +42,7 @@ import logging
 import os
 import signal
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +115,17 @@ class InsufficientVRAMError(Exception):
     """Raised when a backend cannot fit even after evicting everything else."""
 
 
+class _BusyBlock(Exception):
+    """
+    Internal signal: eviction is blocked because the only backends that could
+    be evicted are busy (have in-flight requests). Carries their names so the
+    caller can wait for one to drain (outside the lock) and retry.
+    """
+    def __init__(self, busy_names):
+        self.busy_names = list(busy_names)
+        super().__init__(f"eviction blocked by busy backends: {self.busy_names}")
+
+
 class Orchestrator:
     """
     Coordinates multiple ServiceLoaders under shared VRAM and sysram budgets.
@@ -135,6 +163,15 @@ class Orchestrator:
             c.name: ServiceLoader(c, event_callback=event_callback) for c in configs
         }
         self._lock = asyncio.Lock()  # Serializes ensure_running / eviction decisions
+        # ── Request slots (concurrency 1 per backend) ────────────────────
+        # A backend with an in-flight request is "busy". A new request for a
+        # busy backend waits its turn (the per-backend semaphore), and
+        # _make_room never evicts a busy backend — so a new request queues
+        # behind a running one instead of killing it. See request_slot and
+        # _make_room_or_block.
+        self._backend_slots: dict[str, asyncio.Semaphore] = {}
+        self._busy: set[str] = set()
+        self._busy_cond = asyncio.Condition()
         # Extra VRAM attributed beyond the process itself — e.g. the model a
         # warm ComfyUI instance currently holds resident (loaded on demand).
         self._extra_vram: dict[str, float] = {}
@@ -162,6 +199,51 @@ class Orchestrator:
 
     def _running(self) -> list[ServiceLoader]:
         return [s for s in self.services.values() if s.is_alive]
+
+    # ── Request slots (concurrency 1 per backend) ────────────────────────
+
+    def _slot_for(self, name: str) -> asyncio.Semaphore:
+        """Per-backend concurrency-1 gate (created lazily)."""
+        slot = self._backend_slots.get(name)
+        if slot is None:
+            slot = asyncio.Semaphore(1)
+            self._backend_slots[name] = slot
+        return slot
+
+    async def acquire_slot(self, name: str) -> None:
+        """
+        Acquire the concurrency-1 slot for a backend and mark it busy.
+
+        Waits until no other request is in flight on this backend. The busy
+        mark is what stops _make_room from evicting this backend mid-request.
+        """
+        await self._slot_for(name).acquire()
+        async with self._busy_cond:
+            self._busy.add(name)
+
+    async def release_slot(self, name: str) -> None:
+        """Clear the busy mark and release the backend's concurrency slot."""
+        async with self._busy_cond:
+            self._busy.discard(name)
+            self._busy_cond.notify_all()
+        self._slot_for(name).release()
+
+    @asynccontextmanager
+    async def request_slot(self, name: str):
+        """
+        Hold the concurrency-1 slot for a backend for the duration of a
+        request. Non-streaming routes use this directly; streaming routes
+        use acquire_slot/release_slot so the slot survives the response body.
+        """
+        await self.acquire_slot(name)
+        try:
+            yield
+        finally:
+            await self.release_slot(name)
+
+    def busy_backends(self) -> list[str]:
+        """Names of backends with an in-flight request (for /status)."""
+        return sorted(self._busy)
 
     # ── Sysram accounting (CPU backends) ─────────────────────────────────
 
@@ -224,6 +306,11 @@ class Orchestrator:
         Guarantee the named backend is running and healthy, evicting others
         if VRAM pressure demands it. Returns its ServiceLoader.
 
+        If the only backends that could be evicted are busy (have in-flight
+        requests), this *waits for one to finish* rather than killing it —
+        so a new request queues behind a running one. The wait happens
+        outside the orchestrator lock, so unrelated backends are not blocked.
+
         Args:
             extra_vram_gb: On-demand model VRAM required beyond the process
                 itself (ComfyUI per-model budgets). If the backend is already
@@ -239,13 +326,44 @@ class Orchestrator:
         loader = self.services[name]
         is_cpu = loader.config.expected_ram_gb > 0 and loader.config.expected_vram_gb == 0
 
+        while True:
+            try:
+                return await self._ensure_running_locked(name, extra_vram_gb, is_cpu)
+            except _BusyBlock as block:
+                logger.info(
+                    "VRAM pressure: waiting for in-flight backend(s) %s to finish "
+                    "before making room for '%s' (will not evict a busy backend)",
+                    ", ".join(sorted(block.busy_names)), name,
+                )
+                # Wait OUTSIDE the lock for one of the busy backends to drain,
+                # then retry. The drained backend is now idle and evictable.
+                await self._wait_for_busy_drain(block.busy_names)
+
+    async def _wait_for_busy_drain(self, busy_names) -> None:
+        """
+        Block (without holding self._lock) until at least one of the named
+        busy backends is no longer busy. Called when eviction is blocked by
+        in-flight requests.
+        """
+        names = set(busy_names)
+        async with self._busy_cond:
+            while names and names.issubset(self._busy):
+                await self._busy_cond.wait()
+
+    async def _ensure_running_locked(self, name: str, extra_vram_gb: float, is_cpu: bool) -> ServiceLoader:
+        """
+        ensure_running's body, run under self._lock. Raises _BusyBlock (which
+        the caller handles by waiting outside the lock and retrying) when
+        eviction is blocked by busy backends.
+        """
+        loader = self.services[name]
         async with self._lock:
             # Fast path: alive and healthy.
             if loader.is_alive:
                 if await loader.is_healthy():
                     increase = extra_vram_gb - self._extra_vram.get(name, 0.0)
                     if increase > 0:
-                        await self._make_room(increase, exclude=name, cpu=is_cpu)
+                        await self._make_room_or_block(increase, exclude=name, cpu=is_cpu)
                     return loader
                 logger.warning("[%s] Health check failed — killing and relaunching", name)
                 await loader.save_slot_cache()
@@ -258,7 +376,7 @@ class Orchestrator:
             else:
                 needed = loader.config.expected_vram_gb + extra_vram_gb
             if needed > 0:
-                await self._make_room(needed, exclude=name, cpu=is_cpu)
+                await self._make_room_or_block(needed, exclude=name, cpu=is_cpu)
 
             # Launch with retries, re-checking VRAM pressure after each failure.
             attempts = 1 + max(0, loader.config.retries)
@@ -272,7 +390,7 @@ class Orchestrator:
                 # available budget was optimistic (e.g. unmanaged GPU consumers
                 # like Xorg). Try evicting more before retrying.
                 if attempt < attempts and not is_cpu:
-                    await self._make_room(needed, exclude=name, cpu=False)
+                    await self._make_room_or_block(needed, exclude=name, cpu=False)
 
             if not started:
                 raise RuntimeError(f"Backend '{name}' failed to start after {attempts} attempt(s)")
@@ -280,6 +398,35 @@ class Orchestrator:
             # Restore slot cache after successful launch (llama.cpp only).
             await loader.restore_slot_cache()
             return loader
+
+    async def _make_room_or_block(self, needed_gb: float, exclude: str, cpu: bool = False) -> None:
+        """
+        Make room for needed_gb by evicting idle backends. If it cannot fit
+        and the only evictable backends are busy, raise _BusyBlock (the
+        caller waits for one to drain and retries). If it genuinely cannot
+        fit (exceeds total budget) or no busy backends are blocking, raise
+        InsufficientVRAMError.
+        """
+        try:
+            await self._make_room(needed_gb, exclude=exclude, cpu=cpu)
+            return
+        except InsufficientVRAMError:
+            # If it can never fit even with everything evicted, don't wait.
+            if cpu:
+                mem_total = await self._mem_total_gb()
+                budget = (mem_total - self.sysram_reserve_gb) if mem_total is not None else None
+                never = budget is not None and needed_gb > budget
+            else:
+                never = needed_gb > self.total_vram_gb - self.vram_reserve_gb
+            if never:
+                raise
+            busy_victims = [
+                s.config.name for s in self._running()
+                if s.config.name != exclude and s.config.name in self._busy
+            ]
+            if busy_victims:
+                raise _BusyBlock(busy_victims)
+            raise
 
     async def _make_room(self, needed_gb: float, exclude: str, cpu: bool = False) -> None:
         """
@@ -328,8 +475,13 @@ class Orchestrator:
                 if available >= needed_gb:
                     return
 
+        # Never evict a backend with an in-flight request — that would kill a
+        # request that is already running. Busy backends are skipped here; the
+        # caller (_make_room_or_block) waits for them to drain instead.
         victims = sorted(
-            (s for s in self._running() if s.config.name != exclude),
+            (s for s in self._running()
+             if s.config.name != exclude
+             and s.config.name not in self._busy),
             key=tracker,
         )
 
@@ -367,7 +519,7 @@ class Orchestrator:
 
         Args:
             pid: The PID of the evicted process (may be None if it exited before we checked).
-            expected_freed_gb: Approximate VRAM that should have been freed.
+            expected_freed_gb: Approximate GB that should have been freed.
         """
         if pid is None:
             return  # Process already exited.
@@ -605,6 +757,7 @@ class Orchestrator:
             "total_vram_gb": self.total_vram_gb,
             "vram_reserve_gb": self.vram_reserve_gb,
             "available_vram_gb": round(await self.available_vram_gb(), 2),
+            "busy_backends": self.busy_backends(),
             "vram_hogs": [
                 {"pid": pid, "vram_gb": round(gb, 2), "name": name}
                 for pid, gb, name in hogs

@@ -131,15 +131,28 @@ def create_app(config: RouterConfig) -> FastAPI:
         return JSONResponse(status_code=status, content={"error": {"message": message}})
 
     async def proxy(request: Request, backend_name: str, body: bytes | None = None) -> StreamingResponse:
-        """Ensure the backend is up, then stream the request through to it."""
+        """Ensure the backend is up, then stream the request through to it.
+
+        Holds the backend's concurrency-1 slot for the whole request —
+        including the streamed response body — so a new request queues
+        behind this one instead of evicting the backend mid-stream.
+        """
         logger.debug("[%s] Proxying %s %s (body=%s bytes)", backend_name, request.method, request.url.path, len(body) if body else 0)
+
+        # Acquire the concurrency-1 slot up front so this backend is marked
+        # busy for the entire request (including the eviction decisions below
+        # and the streamed body). Released on every path below.
+        await orch.acquire_slot(backend_name)
+
         try:
             loader = await orch.ensure_running(backend_name)
         except InsufficientVRAMError as exc:
             logger.error("[%s] Insufficient VRAM: %s", backend_name, exc)
+            await orch.release_slot(backend_name)
             return error(507, str(exc))
         except (KeyError, RuntimeError) as exc:
             logger.error("[%s] Backend error: %s", backend_name, exc)
+            await orch.release_slot(backend_name)
             return error(503, str(exc))
 
         port = loader.config.port
@@ -155,6 +168,7 @@ def create_app(config: RouterConfig) -> FastAPI:
             resp = await http.request(request.method, url, data=body, headers=headers)
         except aiohttp.ClientError as exc:
             logger.error("[%s] Backend request failed: %s", backend_name, exc)
+            await orch.release_slot(backend_name)
             return error(503, f"Backend '{backend_name}' unreachable: {exc}")
 
         logger.debug("[%s] Backend responded: %d", backend_name, resp.status)
@@ -165,6 +179,9 @@ def create_app(config: RouterConfig) -> FastAPI:
                     yield chunk
             finally:
                 resp.release()
+                # The body is fully sent (or the client disconnected) — the
+                # request is done, so release the backend's concurrency slot.
+                await orch.release_slot(backend_name)
 
         out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in HOP_HEADERS}
         return StreamingResponse(stream(), status_code=resp.status, headers=out_headers)
@@ -285,26 +302,29 @@ def create_app(config: RouterConfig) -> FastAPI:
             return error(400, str(exc))
 
         # Launch/reuse ComfyUI with room for this specific model's VRAM.
-        try:
-            loader = await orch.ensure_running(img_model.backend, extra_vram_gb=img_model.vram_gb)
-        except InsufficientVRAMError as exc:
-            return error(507, str(exc))
-        except (KeyError, RuntimeError) as exc:
-            return error(503, str(exc))
+        # Hold the backend's concurrency-1 slot for the whole generation so a
+        # second image request queues behind this one instead of evicting it.
+        async with orch.request_slot(img_model.backend):
+            try:
+                loader = await orch.ensure_running(img_model.backend, extra_vram_gb=img_model.vram_gb)
+            except InsufficientVRAMError as exc:
+                return error(507, str(exc))
+            except (KeyError, RuntimeError) as exc:
+                return error(503, str(exc))
 
-        client = ComfyUIClient(
-            port=loader.config.port,
-            output_dir=config.comfyui_output_dirs.get(img_model.backend),
-        )
-        try:
-            results = await client.generate(workflow)
-        except ComfyUIError as exc:
-            return error(502, f"Image generation failed: {exc}")
-        except aiohttp.ClientError as exc:
-            return error(503, f"ComfyUI unreachable: {exc}")
+            client = ComfyUIClient(
+                port=loader.config.port,
+                output_dir=config.comfyui_output_dirs.get(img_model.backend),
+            )
+            try:
+                results = await client.generate(workflow)
+            except ComfyUIError as exc:
+                return error(502, f"Image generation failed: {exc}")
+            except aiohttp.ClientError as exc:
+                return error(503, f"ComfyUI unreachable: {exc}")
 
-        # Model is now resident in the warm ComfyUI process — track its VRAM.
-        orch.note_extra_vram(img_model.backend, img_model.vram_gb)
+            # Model is now resident in the warm ComfyUI process — track its VRAM.
+            orch.note_extra_vram(img_model.backend, img_model.vram_gb)
 
         return build_openai_response(
             results,
@@ -360,33 +380,36 @@ def create_app(config: RouterConfig) -> FastAPI:
             return error(400, str(exc))
 
         # Launch/reuse ComfyUI with room for this specific model's VRAM.
-        try:
-            loader = await orch.ensure_running(music_model.backend, extra_vram_gb=music_model.vram_gb)
-        except InsufficientVRAMError as exc:
-            return error(507, str(exc))
-        except (KeyError, RuntimeError) as exc:
-            return error(503, str(exc))
+        # Hold the backend's concurrency-1 slot for the whole generation so a
+        # second music request queues behind this one instead of evicting it.
+        async with orch.request_slot(music_model.backend):
+            try:
+                loader = await orch.ensure_running(music_model.backend, extra_vram_gb=music_model.vram_gb)
+            except InsufficientVRAMError as exc:
+                return error(507, str(exc))
+            except (KeyError, RuntimeError) as exc:
+                return error(503, str(exc))
 
-        client = ComfyUIClient(
-            port=loader.config.port,
-            output_dir=config.comfyui_output_dirs.get(music_model.backend),
-        )
-        t0 = time.monotonic()
-        try:
-            results = await client.generate_audio(workflow)
-            elapsed = time.monotonic() - t0
-            logger.info("Music generation completed in %.1fs", elapsed)
-        except ComfyUIError as exc:
-            elapsed = time.monotonic() - t0
-            logger.error("Music generation failed after %.1fs: %s", elapsed, exc)
-            return error(502, f"Music generation failed: {exc}")
-        except aiohttp.ClientError as exc:
-            elapsed = time.monotonic() - t0
-            logger.error("Music generation unreachable after %.1fs: %s", elapsed, exc)
-            return error(503, f"ComfyUI unreachable: {exc}")
+            client = ComfyUIClient(
+                port=loader.config.port,
+                output_dir=config.comfyui_output_dirs.get(music_model.backend),
+            )
+            t0 = time.monotonic()
+            try:
+                results = await client.generate_audio(workflow)
+                elapsed = time.monotonic() - t0
+                logger.info("Music generation completed in %.1fs", elapsed)
+            except ComfyUIError as exc:
+                elapsed = time.monotonic() - t0
+                logger.error("Music generation failed after %.1fs: %s", elapsed, exc)
+                return error(502, f"Music generation failed: {exc}")
+            except aiohttp.ClientError as exc:
+                elapsed = time.monotonic() - t0
+                logger.error("Music generation unreachable after %.1fs: %s", elapsed, exc)
+                return error(503, f"ComfyUI unreachable: {exc}")
 
-        # Model is now resident in the warm ComfyUI process — track its VRAM.
-        orch.note_extra_vram(music_model.backend, music_model.vram_gb)
+            # Model is now resident in the warm ComfyUI process — track its VRAM.
+            orch.note_extra_vram(music_model.backend, music_model.vram_gb)
 
         return build_music_openai_response(
             results,
@@ -427,32 +450,35 @@ def create_app(config: RouterConfig) -> FastAPI:
         except ComfyUIError as exc:
             return error(400, str(exc))
 
-        try:
-            loader = await orch.ensure_running(video_model.backend, extra_vram_gb=video_model.vram_gb)
-        except InsufficientVRAMError as exc:
-            return error(507, str(exc))
-        except (KeyError, RuntimeError) as exc:
-            return error(503, str(exc))
+        # Hold the backend's concurrency-1 slot for the whole generation so a
+        # second video request queues behind this one instead of evicting it.
+        async with orch.request_slot(video_model.backend):
+            try:
+                loader = await orch.ensure_running(video_model.backend, extra_vram_gb=video_model.vram_gb)
+            except InsufficientVRAMError as exc:
+                return error(507, str(exc))
+            except (KeyError, RuntimeError) as exc:
+                return error(503, str(exc))
 
-        client = ComfyUIClient(
-            port=loader.config.port,
-            output_dir=config.comfyui_output_dirs.get(video_model.backend),
-        )
-        t0 = time.monotonic()
-        try:
-            results = await client.generate_video(workflow)
-            elapsed = time.monotonic() - t0
-            logger.info("Video generation completed in %.1fs", elapsed)
-        except ComfyUIError as exc:
-            elapsed = time.monotonic() - t0
-            logger.error("Video generation failed after %.1fs: %s", elapsed, exc)
-            return error(502, f"Video generation failed: {exc}")
-        except aiohttp.ClientError as exc:
-            elapsed = time.monotonic() - t0
-            logger.error("Video generation unreachable after %.1fs: %s", elapsed, exc)
-            return error(503, f"ComfyUI unreachable: {exc}")
+            client = ComfyUIClient(
+                port=loader.config.port,
+                output_dir=config.comfyui_output_dirs.get(video_model.backend),
+            )
+            t0 = time.monotonic()
+            try:
+                results = await client.generate_video(workflow)
+                elapsed = time.monotonic() - t0
+                logger.info("Video generation completed in %.1fs", elapsed)
+            except ComfyUIError as exc:
+                elapsed = time.monotonic() - t0
+                logger.error("Video generation failed after %.1fs: %s", elapsed, exc)
+                return error(502, f"Video generation failed: {exc}")
+            except aiohttp.ClientError as exc:
+                elapsed = time.monotonic() - t0
+                logger.error("Video generation unreachable after %.1fs: %s", elapsed, exc)
+                return error(503, f"ComfyUI unreachable: {exc}")
 
-        orch.note_extra_vram(video_model.backend, video_model.vram_gb)
+            orch.note_extra_vram(video_model.backend, video_model.vram_gb)
         return build_video_openai_response(results, created=int(time.time()))
 
     @app.post("/v1/videos/generations")
@@ -636,27 +662,31 @@ def create_app(config: RouterConfig) -> FastAPI:
             "max_tokens": 1024,
         }
 
-        try:
-            loader = await orch.ensure_running(augment_backend)
-        except InsufficientVRAMError as exc:
-            return error(507, str(exc))
-        except (KeyError, RuntimeError) as exc:
-            return error(503, str(exc))
+        # Hold the LLM backend's concurrency-1 slot for the augmentation call
+        # so a second augmented request queues behind this one instead of
+        # evicting the LLM backend mid-generation.
+        async with orch.request_slot(augment_backend):
+            try:
+                loader = await orch.ensure_running(augment_backend)
+            except InsufficientVRAMError as exc:
+                return error(507, str(exc))
+            except (KeyError, RuntimeError) as exc:
+                return error(503, str(exc))
 
-        llm_port = loader.config.port
-        llm_url = f"http://127.0.0.1:{llm_port}/v1/chat/completions"
-        http: aiohttp.ClientSession = app.state.http
+            llm_port = loader.config.port
+            llm_url = f"http://127.0.0.1:{llm_port}/v1/chat/completions"
+            http: aiohttp.ClientSession = app.state.http
 
-        try:
-            async with http.post(llm_url, json=llm_request) as llm_resp:
-                llm_body = await llm_resp.json()
-                if llm_resp.status != 200:
-                    return error(502, f"Prompt augmentation failed: {llm_body}")
-                augmented_prompt = llm_body.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                if not augmented_prompt:
-                    return error(502, "Prompt augmentation returned empty response")
-        except aiohttp.ClientError as exc:
-            return error(503, f"LLM backend unreachable for prompt augmentation: {exc}")
+            try:
+                async with http.post(llm_url, json=llm_request) as llm_resp:
+                    llm_body = await llm_resp.json()
+                    if llm_resp.status != 200:
+                        return error(502, f"Prompt augmentation failed: {llm_body}")
+                    augmented_prompt = llm_body.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    if not augmented_prompt:
+                        return error(502, "Prompt augmentation returned empty response")
+            except aiohttp.ClientError as exc:
+                return error(503, f"LLM backend unreachable for prompt augmentation: {exc}")
 
         logger.info("Augmented video prompt (%d chars): %.200s…", len(augmented_prompt), augmented_prompt)
 
