@@ -363,6 +363,21 @@ backends:
       minimax_music_3:
         workflow: ~/projectnotes/workflows/audio_minimax_music_3.json
         vram_usage: 25
+    # ── ComfyUI (video) — dedicated instance launched with --fp16-unet.
+  # The MiniMax H3 video models (T2V + I2V) run here so the fp16 UNet flag
+  # applies to every video pathway without changing image/music precision.
+  video:
+    type: comfyui
+    venv: ~/stable_diffusion/ComfyUI/venv/bin/python
+    working_dir: ~/stable_diffusion/ComfyUI
+    main: main.py
+    port: 8189
+    vram_usage: 3         # Torch CUDA context + ComfyUI overhead
+    output_dir: ~/stable_diffusion/ComfyUI/output
+    retries: 1
+    health_timeout: 60
+    extra_args:
+      - "--fp16-unet"
     video_models:
       minimax_h3_t2v_turbo:
         workflow: ~/projectnotes/workflows/minimax_h3_t2v_turbo.json
