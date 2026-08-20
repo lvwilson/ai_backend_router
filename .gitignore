@@ -53,3 +53,9 @@ demo/output/*.aac
 # Runtime logs
 nohup.out
 
+# Session memory / local state
+.episodes
+
+# Auto-generated code summaries
+*.summary
+
