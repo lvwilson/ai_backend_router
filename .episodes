@@ -1,2 +1,0 @@
-Episode 109: Added 6 missing music generation parameters (cfg_scale, temperature, top_p, top_k, min_p, steps) to both mobile.html and frontend.html to match the full set accepted by the router's /v1/music/generations endpoint. Soft-restarted the router via POST /v1/models/restart-router. Note: always soft-restart the router after modifying frontend files or config.yaml so changes take effect immediately.
-
