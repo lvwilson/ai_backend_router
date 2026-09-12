@@ -315,11 +315,17 @@ def inject_video_parameters(
 def build_video_openai_response(
     videos: list[dict[str, Any]],
     created: int,
+    augmented_prompt: str | None = None,
 ) -> dict[str, Any]:
     """
     Build an OpenAI-style /v1/videos/generations response.
 
     Each data item includes the local `path` where ComfyUI saved the video file.
+
+    `augmented_prompt` is the description produced by the LLM augmentation
+    step (the /augmented endpoint); when provided it is echoed back as the
+    top-level `augmented_prompt` field so callers can see exactly what the
+    video model received instead of their raw idea.
     """
     data = []
     for video in videos:
@@ -328,7 +334,10 @@ def build_video_openai_response(
             item["path"] = video["path"]
         item["comfyui"] = {k: video[k] for k in ("filename", "subfolder", "type") if k in video}
         data.append(item)
-    return {"created": created, "data": data}
+    resp: dict[str, Any] = {"created": created, "data": data}
+    if augmented_prompt is not None:
+        resp["augmented_prompt"] = augmented_prompt
+    return resp
 
 
 def _frame_image_targets(

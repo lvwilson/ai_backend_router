@@ -433,6 +433,7 @@ def create_app(config: RouterConfig) -> FastAPI:
         prompt: str,
         first_image: str | None = None,
         last_image: str | None = None,
+        augmented_prompt: str | None = None,
     ) -> JSONResponse | StreamingResponse:
         """Core video generation: inject params, run ComfyUI workflow, return response.
 
@@ -440,6 +441,10 @@ def create_app(config: RouterConfig) -> FastAPI:
         routed to the LoadImage nodes that feed the workflow's `first_frame` /
         `last_frame` conditioning inputs, so a two-frame (FL2VA) workflow
         receives both reference frames.
+
+        `augmented_prompt` is the LLM-rewritten description sent to the model
+        (augmented route only); it is echoed back in the response so callers
+        can see what the video model actually received.
         """
         try:
             video_model = config.resolve_video_model(req.get("model"))
@@ -493,7 +498,7 @@ def create_app(config: RouterConfig) -> FastAPI:
                 return error(503, f"ComfyUI unreachable: {exc}")
 
             orch.note_extra_vram(video_model.backend, video_model.vram_gb)
-        return build_video_openai_response(results, created=int(time.time()))
+        return build_video_openai_response(results, created=int(time.time()), augmented_prompt=augmented_prompt)
 
     @app.post("/v1/videos/generations")
     async def videos(request: Request):
@@ -721,7 +726,9 @@ def create_app(config: RouterConfig) -> FastAPI:
 
         logger.info("Augmented video prompt (%d chars): %.200s…", len(augmented_prompt), augmented_prompt)
 
-        return await _do_video_generation(req, augmented_prompt, first_image, last_image)
+        # Echo the LLM's description back in the response so callers can see
+        # exactly what the video model received instead of their raw idea.
+        return await _do_video_generation(req, augmented_prompt, first_image, last_image, augmented_prompt=augmented_prompt)
 
     # ── Ops routes ───────────────────────────────────────────────────────
 

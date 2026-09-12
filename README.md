@@ -113,6 +113,51 @@ Music parameters:
 ML-specific params (cfg_scale, temperature, top_p, etc.) have sensible
 per-model defaults and need not be set manually.
 
+# Video generation — two pathways (MiniMax H3)
+# Models: minimax_h3_t2v_turbo | minimax_h3_i2v_turbo | minimax_h3_fl2va
+#
+# Raw — your prompt goes straight to the model (no LLM rewrite):
+curl http://localhost:8000/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minimax_h3_i2v_turbo",
+    "prompt": "A lighthouse at dusk, waves crashing against the rock",
+    "image": "first_frame.png",
+    "duration": 3
+  }'
+
+# Augmented — an LLM first rewrites your brief idea into a detailed model
+# prompt (using the MiniMax H3 guide and any reference frame image(s)), then
+# the rewritten description is sent to the model. The rewritten description is
+# echoed back in the response as `augmented_prompt`:
+curl http://localhost:8000/v1/videos/generations/augmented \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minimax_h3_fl2va",
+    "prompt": "A lighthouse at dusk becomes a haunted ruin",
+    "image": "first_frame.png",
+    "last_image": "last_frame.png",
+    "duration": 5
+  }'
+
+Video parameters:
+  • model       — minimax_h3_t2v_turbo (text-to-video),
+                  minimax_h3_i2v_turbo (single first-frame reference),
+                  minimax_h3_fl2va (first + last frame reference)
+  • prompt      — Full model prompt (raw) or a brief idea (augmented)
+  • image       — First-frame filename in the ComfyUI input dir (I2V/FL2VA)
+  • last_image  — Last-frame filename (FL2VA); an I2V request must include
+                  at least one of image / last_image
+  • duration    — Seconds (default 3)
+  • seed        — 0 for random, or a specific integer
+
+Response shape:
+  Raw       → { "created": <int>, "data": [ { "path": "...mp4", "comfyui": {…} } ] }
+  Augmented → same, plus "augmented_prompt": "<the LLM's rewritten description>"
+
+(Both endpoints also accept multipart/form-data — fields prompt/model/duration/
+seed/…, with `image_file` and `last_image_file` for frame uploads.)
+
 # List available models
 curl http://localhost:8000/v1/models
 
