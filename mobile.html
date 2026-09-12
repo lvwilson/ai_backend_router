@@ -229,6 +229,17 @@
   }
   .response-body img { max-width: 100%; border-radius: var(--radius-sm); margin-top: 8px; }
   .response-body audio { width: 100%; margin-top: 8px; }
+  .response-body video { max-width: 100%; }
+  .btn-save-video {
+    margin-top: 8px; width: 100%;
+    padding: 11px;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--surface2); color: var(--text);
+    font-size: 13px; font-weight: 700; cursor: pointer;
+    transition: border-color 0.2s, transform 0.1s;
+  }
+  .btn-save-video:active { transform: scale(0.97); border-color: var(--accent); }
+  .btn-save-video:disabled { opacity: 0.5; cursor: default; }
 
   /* ── Welcome ─────────────────────────────────────────────── */
   .welcome {
@@ -850,6 +861,28 @@ async function loadImageData(base, path) {
   return null;
 }
 
+// Download a data-URL asset (video) as a named file. Works in mobile
+// Safari (Save to Files), Android Chrome, and desktop (Downloads folder).
+function downloadDataUrl(dataUrl, name, btn) {
+  const m = /^data:([^;,]+);base64,(.+)$/.exec(dataUrl);
+  if (!m) return;
+  try {
+    const bytes = Uint8Array.from(atob(m[2]), c => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: m[1] }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    btn.textContent = "\u2713 Saved";
+    setTimeout(() => { btn.disabled = false; btn.textContent = "\u2b07 Save Video"; }, 1500);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = "\u26a0 Save failed \u2014 long-press video"; }
+  }
+}
+
 async function showResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
   statusEl.textContent = `${r.status} ${r.statusText}`;
   statusEl.className = `status s${Math.floor(r.status / 100)}xx`;
@@ -941,10 +974,18 @@ async function showVideoResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
         const path = item.path || item.url || "";
         if (path) {
           const div = document.createElement("div"); div.style.marginTop = "12px";
-          div.innerHTML = `<video controls style="max-width:100%;border-radius:8px;display:none;"></video><span style="font-size:12px;color:var(--muted);">loading…</span>`;
+          div.innerHTML = `<video controls playsinline style="max-width:100%;border-radius:8px;display:none;"></video><span style="font-size:12px;color:var(--muted);">loading…</span>`;
           const video = div.querySelector("video"); const loading = div.querySelector("span");
           const src = await loadImageData(base, path);
-          if (src) { video.src = src; video.style.display = "block"; loading.style.display = "none"; }
+          if (src) {
+            video.src = src; video.style.display = "block"; loading.style.display = "none";
+            const fname = (item.comfyui && item.comfyui.filename) || path.split("/").pop() || "video.mp4";
+            const dlBtn = document.createElement("button");
+            dlBtn.className = "btn-save-video";
+            dlBtn.textContent = "\u2b07 Save Video";
+            dlBtn.onclick = () => { dlBtn.disabled = true; downloadDataUrl(src, fname, dlBtn); };
+            div.appendChild(dlBtn);
+          }
           else loading.textContent = `⚠ ${escHtml(path)}`;
           bodyEl.appendChild(div);
         }
