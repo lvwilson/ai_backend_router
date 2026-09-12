@@ -16,7 +16,7 @@
   },
   "114": {
     "inputs": {
-      "image": "Krea2_00121_.png"
+      "image": null
     },
     "class_type": "LoadImage",
     "_meta": {

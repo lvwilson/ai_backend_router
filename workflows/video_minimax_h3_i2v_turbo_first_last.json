@@ -16,7 +16,7 @@
   },
   "126": {
     "inputs": {
-      "image": "test_book_1.png"
+      "image": null
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -25,7 +25,7 @@
   },
   "127": {
     "inputs": {
-      "image": "test_book_2.png"
+      "image": null
     },
     "class_type": "LoadImage",
     "_meta": {
