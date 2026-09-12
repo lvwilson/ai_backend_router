@@ -59,3 +59,5 @@ nohup.out
 # Auto-generated code summaries
 *.summary
 
+*.bak
+*.out
