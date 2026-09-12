@@ -255,7 +255,8 @@ def inject_video_parameters(
     prompt: str,
     duration: float = 3.0,
     seed: int | None = None,
-    image: str | None = None,
+    first_image: str | None = None,
+    last_image: str | None = None,
     megapixels: float | None = None,
     width: int | None = None,
     height: int | None = None,
@@ -264,22 +265,32 @@ def inject_video_parameters(
     Return a copy of the MiniMax H3 video workflow with request parameters injected.
 
     Updates nodes:
-      • MiniMaxH3ImageToVideo (105:104) → prompt, width, height (T2V mode)
+      • MiniMaxH3ImageToVideo (105:104) → prompt, width/height (T2V only; FL2VA
+                                            links them to the first frame)
       • PrimitiveFloat (105:111)        → duration (seconds)
       • RandomNoise (105:15)            → noise_seed
-      • LoadImage (114)                 → image filename (for I2V mode)
-      • ImageScaleToTotalPixels (119)   → megapixels (for I2V mode)
+      • LoadImage                       → first_image / last_image, routed via the
+                                            workflow's first_frame / last_frame links
+      • ImageScaleToTotalPixels (119)   → megapixels (I2V only)
+
+    `first_image` / `last_image` are ComfyUI input-dir filenames (or None). Each
+    is traced to the LoadImage node that feeds the corresponding conditioning
+    input of the MiniMaxH3ImageToVideo node (through any intermediate nodes), so
+    I2V sends its single frame and FL2VA sends both frames to distinct nodes.
     """
     wf = copy.deepcopy(workflow)
     seed_value = seed if seed is not None and seed >= 0 else random.randint(0, 2**48)
+    frame_targets = _frame_image_targets(wf, first_image, last_image)
 
-    for node in wf.values():
+    for node_id, node in wf.items():
         ctype = node.get("class_type", "")
         inputs = node.get("inputs", {})
 
         if ctype == "MiniMaxH3ImageToVideo":
             inputs["prompt"] = prompt
-            # For T2V: width/height are scalar values (not links)
+            # For T2V: width/height are scalar values (not links). For FL2VA they
+            # are links to a GetImageSize node, so they derive from the first
+            # frame and scalar width/height are intentionally not applied.
             if width is not None and not isinstance(inputs.get("width"), list):
                 inputs["width"] = width
             if height is not None and not isinstance(inputs.get("height"), list):
@@ -291,9 +302,8 @@ def inject_video_parameters(
         elif ctype == "RandomNoise":
             inputs["noise_seed"] = seed_value
 
-        elif ctype == "LoadImage":
-            if image is not None:
-                inputs["image"] = image
+        elif ctype == "LoadImage" and node_id in frame_targets:
+            inputs["image"] = frame_targets[node_id]
 
         elif ctype == "ImageScaleToTotalPixels":
             if megapixels is not None:
@@ -319,6 +329,62 @@ def build_video_openai_response(
         item["comfyui"] = {k: video[k] for k in ("filename", "subfolder", "type") if k in video}
         data.append(item)
     return {"created": created, "data": data}
+
+
+def _frame_image_targets(
+    wf: dict,
+    first_image: str | None,
+    last_image: str | None,
+) -> dict[str, str]:
+    """
+    Map LoadImage node_id -> image filename for first/last-frame conditioning.
+
+    Traces each MiniMaxH3ImageToVideo `first_frame` / `last_frame` input back to
+    the LoadImage node that feeds it (following intermediate links such as a
+    scale node), so a two-image workflow (e.g. the FL2VA first+last workflow)
+    routes each reference frame to the correct conditioning input instead of
+    stamping the same filename onto every LoadImage node.
+    """
+    targets: dict[str, str] = {}
+    if not first_image and not last_image:
+        return targets
+
+    def _trace_to_loadimage(link: Any) -> str | None:
+        """Follow a link chain to the node_id of the LoadImage that feeds it."""
+        current = link
+        seen: set[str] = set()
+        while isinstance(current, list) and current:
+            node_id = str(current[0])
+            node = wf.get(node_id)
+            if node is None:
+                return None
+            if node.get("class_type") == "LoadImage":
+                return node_id
+            # Walk back through the first linked input toward the source node.
+            nxt = None
+            for v in node.get("inputs", {}).values():
+                if isinstance(v, list):
+                    nxt = v
+                    break
+            if nxt is None or str(nxt[0]) in seen:
+                return None
+            seen.add(node_id)
+            current = nxt
+        return None
+
+    for node in wf.values():
+        if node.get("class_type") != "MiniMaxH3ImageToVideo":
+            continue
+        inputs = node.get("inputs", {})
+        if first_image:
+            src_id = _trace_to_loadimage(inputs.get("first_frame"))
+            if src_id:
+                targets[src_id] = first_image
+        if last_image:
+            src_id = _trace_to_loadimage(inputs.get("last_frame"))
+            if src_id:
+                targets[src_id] = last_image
+    return targets
 
 
 # ── Client ─────────────────────────────────────────────────────────────────

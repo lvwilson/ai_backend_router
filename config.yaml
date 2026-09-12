@@ -385,4 +385,7 @@ backends:
       minimax_h3_i2v_turbo:
         workflow: ~/projectnotes/workflows/minimax_h3_i2v_turbo.json
         vram_usage: 40
+      minimax_h3_fl2va:
+        workflow: ~/projectnotes/workflows/video_minimax_h3_i2v_turbo_first_last.json
+        vram_usage: 40
 

@@ -32,6 +32,18 @@
       "title": "Load Image"
     }
   },
+  "128": {
+    "inputs": {
+      "image": [
+        "126",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
   "105:11": {
     "inputs": {
       "vae_name": "minimax_h3_video_vae_fp16.safetensors"
@@ -151,8 +163,14 @@
   "105:104": {
     "inputs": {
       "prompt": "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n\nFor the target video, at 3.00 seconds into the target video, <Picture 1> (from [Shot 2]) is fully referenced.\n\nintegrated_multimodal_description: \n[Shot 1] A magical blue energy dissolves the text, revealing the true message.\n\noverall_soundscape:\nMagic power, mysterious.\n\nnon_diegetic_music:\nN/A",
-      "width": 1024,
-      "height": 768,
+      "width": [
+        "128",
+        0
+      ],
+      "height": [
+        "128",
+        1
+      ],
       "length": [
         "105:107",
         1
@@ -227,7 +245,7 @@
   },
   "105:6": {
     "inputs": {
-      "unet_name": "pinkcherryMMH3Fl2va_06Beta.safetensors",
+      "unet_name": "DasiwaMinimaxH3_dasiwaHybridV1.safetensors",
       "weight_dtype": "default"
     },
     "class_type": "UNETLoader",

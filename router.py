@@ -431,9 +431,16 @@ def create_app(config: RouterConfig) -> FastAPI:
     async def _do_video_generation(
         req: dict,
         prompt: str,
-        image_filename: str | None = None,
+        first_image: str | None = None,
+        last_image: str | None = None,
     ) -> JSONResponse | StreamingResponse:
-        """Core video generation: inject params, run ComfyUI workflow, return response."""
+        """Core video generation: inject params, run ComfyUI workflow, return response.
+
+        `first_image` / `last_image` are ComfyUI input-dir filenames. They are
+        routed to the LoadImage nodes that feed the workflow's `first_frame` /
+        `last_frame` conditioning inputs, so a two-frame (FL2VA) workflow
+        receives both reference frames.
+        """
         try:
             video_model = config.resolve_video_model(req.get("model"))
         except KeyError as exc:
@@ -446,7 +453,8 @@ def create_app(config: RouterConfig) -> FastAPI:
                 prompt=prompt,
                 duration=req.get("duration", 3.0),
                 seed=req.get("seed"),
-                image=image_filename,
+                first_image=first_image,
+                last_image=last_image,
                 megapixels=req.get("megapixels"),
                 width=req.get("width"),
                 height=req.get("height"),
@@ -514,20 +522,24 @@ def create_app(config: RouterConfig) -> FastAPI:
                 "height": int(form["height"]) if form.get("height") else None,
             }
 
-            # Handle uploaded image file
-            image_file = form.get("image_file")
-            image_filename = None
-            if image_file and hasattr(image_file, "filename") and image_file.filename:
-                # Save uploaded file to ComfyUI input directory
-                video_model = config.resolve_video_model(req.get("model"))
-                comfyui_output_dir = config.comfyui_output_dirs.get(video_model.backend)
-                if comfyui_output_dir:
-                    input_dir = Path(comfyui_output_dir).parent / "input"
-                    input_dir.mkdir(parents=True, exist_ok=True)
-                    image_filename = image_file.filename
-                    dest = input_dir / image_filename
-                    dest.write_bytes(await image_file.read())
-                    logger.info("Saved uploaded image to %s", dest)
+            # Handle uploaded frame(s) — first frame (image_file) and, for FL2VA,
+            # last frame (last_image_file). Each is saved to ComfyUI's input dir.
+            first_image = None
+            last_image = None
+            video_model = config.resolve_video_model(req.get("model"))
+            comfyui_output_dir = config.comfyui_output_dirs.get(video_model.backend)
+            input_dir = Path(comfyui_output_dir).parent / "input" if comfyui_output_dir else None
+            for form_name in ("image_file", "last_image_file"):
+                up = form.get(form_name)
+                if not (up and hasattr(up, "filename") and up.filename and input_dir):
+                    continue
+                input_dir.mkdir(parents=True, exist_ok=True)
+                (input_dir / up.filename).write_bytes(await up.read())
+                logger.info("Saved uploaded video frame to %s", input_dir / up.filename)
+                if form_name == "image_file":
+                    first_image = up.filename
+                else:
+                    last_image = up.filename
         else:
             try:
                 req = await request.json()
@@ -538,9 +550,10 @@ def create_app(config: RouterConfig) -> FastAPI:
             if not prompt:
                 return error(400, "Missing required field: prompt")
 
-            image_filename = req.get("image")
+            first_image = req.get("image")
+            last_image = req.get("last_image")
 
-        return await _do_video_generation(req, prompt, image_filename)
+        return await _do_video_generation(req, prompt, first_image, last_image)
 
     @app.post("/v1/videos/generations/augmented")
     async def videos_augmented(request: Request):
@@ -555,7 +568,6 @@ def create_app(config: RouterConfig) -> FastAPI:
         For JSON: 'image' field specifies a filename already in ComfyUI input dir.
         """
         content_type = request.headers.get("content-type", "")
-        image_filename = None
 
         if "multipart/form-data" in content_type:
             form = await request.form()
@@ -572,18 +584,24 @@ def create_app(config: RouterConfig) -> FastAPI:
                 "height": int(form["height"]) if form.get("height") else None,
             }
 
-            # Handle uploaded image file
-            image_file = form.get("image_file")
-            if image_file and hasattr(image_file, "filename") and image_file.filename:
-                video_model = config.resolve_video_model(req.get("model"))
-                comfyui_output_dir = config.comfyui_output_dirs.get(video_model.backend)
-                if comfyui_output_dir:
-                    input_dir = Path(comfyui_output_dir).parent / "input"
-                    input_dir.mkdir(parents=True, exist_ok=True)
-                    image_filename = image_file.filename
-                    dest = input_dir / image_filename
-                    dest.write_bytes(await image_file.read())
-                    logger.info("Saved uploaded image to %s", dest)
+            # Handle uploaded frame(s) — first frame (image_file) and, for FL2VA,
+            # last frame (last_image_file). Each is saved to ComfyUI's input dir.
+            first_image = None
+            last_image = None
+            video_model = config.resolve_video_model(req.get("model"))
+            comfyui_output_dir = config.comfyui_output_dirs.get(video_model.backend)
+            input_dir = Path(comfyui_output_dir).parent / "input" if comfyui_output_dir else None
+            for form_name in ("image_file", "last_image_file"):
+                up = form.get(form_name)
+                if not (up and hasattr(up, "filename") and up.filename and input_dir):
+                    continue
+                input_dir.mkdir(parents=True, exist_ok=True)
+                (input_dir / up.filename).write_bytes(await up.read())
+                logger.info("Saved uploaded video frame to %s", input_dir / up.filename)
+                if form_name == "image_file":
+                    first_image = up.filename
+                else:
+                    last_image = up.filename
         else:
             try:
                 req = await request.json()
@@ -594,16 +612,22 @@ def create_app(config: RouterConfig) -> FastAPI:
             if not prompt:
                 return error(400, "Missing required field: prompt")
 
-            image_filename = req.get("image")
+            first_image = req.get("image")
+            last_image = req.get("last_image")
 
-        # Resolve model to determine mode (T2VA vs I2VA).
+        # Resolve model to determine mode (T2VA / I2VA / FL2VA).
         try:
             video_model = config.resolve_video_model(req.get("model"))
         except KeyError as exc:
             return error(400, str(exc))
 
-        is_i2v = "i2v" in video_model.name.lower()
-        mode_label = "I2VA" if is_i2v else "T2VA"
+        name = video_model.name.lower()
+        if "fl2va" in name:
+            mode_label = "FL2VA"
+        elif "i2v" in name:
+            mode_label = "I2VA"
+        else:
+            mode_label = "T2VA"
 
         # ── Augment via LLM ──────────────────────────────────────────────
         augment_backend = "qwen3.6-27b-instruct"
@@ -617,46 +641,47 @@ def create_app(config: RouterConfig) -> FastAPI:
             f"## Instructions\n\n"
             f"- Produce a highly detailed, vivid, cinematic prompt.\n"
             f"- Use temperature 1.0 — be creative and imaginative.\n"
-            f"- Output ONLY the final prompt (instruction line if I2VA, then the three "
-            f"core fields). Do not include any explanation or markdown wrapping.\n"
+            f"- Output ONLY the final prompt (instruction line if I2VA/FL2VA, then the "
+            f"three core fields). Do not include any explanation or markdown wrapping.\n"
             f"- For I2VA: begin with the first-frame instruction, then a blank line, "
             f"then the three core fields. Reference <Picture 1> in the description.\n"
+            f"- For FL2VA: begin with the first-and-last-frame instruction (Picture 1 at "
+            f"the 0.00-second mark, Picture 2 at the final-second mark), then a blank "
+            f"line, then the three core fields. Describe the motion path between the "
+            f"two frames. Reference Picture 1 and Picture 2 in the description.\n"
             f"- For T2VA: begin directly with the three core fields (no instruction line).\n"
             f"- The video duration is {req.get('duration', 3.0)} seconds.\n"
         )
 
-        # For I2V, include the image in the LLM context so it can analyze the
-        # first frame and write a more accurate, image-aware prompt.
-        if is_i2v and image_filename:
-            import base64 as b64
-            comfyui_output_dir = config.comfyui_output_dirs.get(video_model.backend)
-            if comfyui_output_dir:
-                input_dir = Path(comfyui_output_dir).parent / "input"
-                image_path = input_dir / image_filename
-                if image_path.is_file():
-                    image_bytes = image_path.read_bytes()
-                    image_b64 = b64.b64encode(image_bytes).decode("ascii")
-                    # Determine MIME type from extension
-                    ext = image_path.suffix.lower()
-                    mime_map = {
-                        ".png": "image/png", ".jpg": "image/jpeg",
-                        ".jpeg": "image/jpeg", ".webp": "image/webp",
-                        ".gif": "image/gif",
-                    }
-                    mime_type = mime_map.get(ext, "image/png")
-                    data_uri = f"data:{mime_type};base64,{image_b64}"
-
-                    user_content = [
-                        {"type": "text", "text": f"Create a {mode_label} video from this idea:\n\n{prompt}"},
-                        {"type": "image_url", "image_url": {"url": data_uri}},
-                    ]
-                    logger.info("I2V augmented: passing image to LLM (%s, %d bytes base64)", image_filename, len(image_b64))
-                else:
-                    user_content = f"Create a {mode_label} video from this idea:\n\n{prompt}"
-            else:
-                user_content = f"Create a {mode_label} video from this idea:\n\n{prompt}"
-        else:
-            user_content = f"Create a {mode_label} video from this idea:\n\n{prompt}"
+        # Include the reference frame(s) in the LLM context so it can analyze
+        # them and write an image-aware prompt: first frame for I2VA, first and
+        # last frame for FL2VA.
+        import base64 as b64
+        frames_to_pass = [f for f in (first_image, last_image) if f]
+        comfyui_output_dir = config.comfyui_output_dirs.get(video_model.backend)
+        text = f"Create a {mode_label} video from this idea:\n\n{prompt}"
+        user_content = text
+        if frames_to_pass and comfyui_output_dir:
+            input_dir = Path(comfyui_output_dir).parent / "input"
+            mime_map = {
+                ".png": "image/png", ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg", ".webp": "image/webp",
+                ".gif": "image/gif",
+            }
+            user_content = [{"type": "text", "text": text}]
+            for fname in frames_to_pass:
+                image_path = input_dir / fname
+                if not image_path.is_file():
+                    continue
+                image_b64 = b64.b64encode(image_path.read_bytes()).decode("ascii")
+                mime_type = mime_map.get(image_path.suffix.lower(), "image/png")
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+                })
+                logger.info("Augmented video: passing frame to LLM (%s, %d bytes base64)", fname, len(image_b64))
+            if len(user_content) == 1:
+                user_content = text  # No readable frame — fall back to text only
 
         llm_request = {
             "model": augment_backend,
@@ -696,7 +721,7 @@ def create_app(config: RouterConfig) -> FastAPI:
 
         logger.info("Augmented video prompt (%d chars): %.200s…", len(augmented_prompt), augmented_prompt)
 
-        return await _do_video_generation(req, augmented_prompt, image_filename)
+        return await _do_video_generation(req, augmented_prompt, first_image, last_image)
 
     # ── Ops routes ───────────────────────────────────────────────────────
 

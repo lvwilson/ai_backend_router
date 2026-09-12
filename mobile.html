@@ -463,7 +463,8 @@ const ENDPOINTS = [
           { name: "prompt", type: "textarea", label: "Prompt", default: "A curious monkey on a tropical beach eating a banana" },
           { name: "duration", type: "number", label: "Duration (s)", default: 3 },
           { name: "seed", type: "number", label: "Seed (optional)", default: "" },
-          { name: "image_file", type: "file", label: "First Frame Image (I2V only)", accept: "image/*", video_field: "i2v" },
+          { name: "image_file", type: "file", label: "First Frame Image (I2V / FL2VA)", accept: "image/*", video_field: "i2v,fl2va" },
+          { name: "last_image_file", type: "file", label: "Last Frame Image (FL2VA only)", accept: "image/*", video_field: "fl2va" },
           { name: "megapixels", type: "number", label: "Megapixels (I2V)", default: "0.4", video_field: "i2v" },
           { name: "width", type: "number", label: "Width (T2V)", default: "832", video_field: "t2v" },
           { name: "height", type: "number", label: "Height (T2V)", default: "480", video_field: "t2v" },
@@ -478,7 +479,8 @@ const ENDPOINTS = [
           { name: "prompt", type: "textarea", label: "Brief Idea", default: "monkey eats banana" },
           { name: "duration", type: "number", label: "Duration (s)", default: 3 },
           { name: "seed", type: "number", label: "Seed (optional)", default: "" },
-          { name: "image_file", type: "file", label: "First Frame Image (I2V only)", accept: "image/*", video_field: "i2v" },
+          { name: "image_file", type: "file", label: "First Frame Image (I2V / FL2VA)", accept: "image/*", video_field: "i2v,fl2va" },
+          { name: "last_image_file", type: "file", label: "Last Frame Image (FL2VA only)", accept: "image/*", video_field: "fl2va" },
           { name: "megapixels", type: "number", label: "Megapixels (I2V)", default: "0.4", video_field: "i2v" },
           { name: "width", type: "number", label: "Width (T2V)", default: "832", video_field: "t2v" },
           { name: "height", type: "number", label: "Height (T2V)", default: "480", video_field: "t2v" },
@@ -618,17 +620,18 @@ function setupMobileVideoFields(ep, epId) {
   const modelSelect = document.getElementById(`f_${epId}_model`);
   if (!modelSelect) return;
 
+  function currentMode(model) {
+    if (model.includes("fl2va")) return "fl2va";
+    if (model.includes("i2v")) return "i2v";
+    return "t2v";
+  }
+
   function updateVisibility() {
-    const model = modelSelect.value || "";
-    const isI2V = model.includes("i2v");
+    const mode = currentMode(modelSelect.value || "");
     const body = document.getElementById("body-" + epId);
     body.querySelectorAll("[data-video-field]").forEach(el => {
-      const vf = el.dataset.videoField;
-      if (vf === "i2v") {
-        el.style.display = isI2V ? "" : "none";
-      } else if (vf === "t2v") {
-        el.style.display = !isI2V ? "" : "none";
-      }
+      const modes = el.dataset.videoField.split(",");
+      el.style.display = modes.includes(mode) ? "" : "none";
     });
   }
 
