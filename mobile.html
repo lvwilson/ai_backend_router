@@ -498,34 +498,7 @@ const ENDPOINTS = [
         ]
       },
     ]
-  },
-  {
-    section: "Errors",
-    items: [
-      {
-        id: "err-model", method: "POST", path: "/v1/chat/completions",
-        desc: "Test: unknown model → 400",
-        fields: [
-          { name: "model", type: "text", label: "Model", default: "nonexistent-model" },
-          { name: "messages", type: "textarea", label: "Messages", default: JSON.stringify([{"role":"user","content":"hi"}], null, 2) },
-        ]
-      },
-      {
-        id: "err-image", method: "POST", path: "/v1/images/generations",
-        desc: "Test: missing prompt → 400",
-        fields: [
-          { name: "model", type: "select", label: "Model", options: "image", default: "krea2" },
-        ]
-      },
-      {
-        id: "err-music", method: "POST", path: "/v1/music/generations",
-        desc: "Test: missing tags → 400",
-        fields: [
-          { name: "model", type: "select", label: "Model", options: "music", default: "ace_step_1.5_xl_turbo" },
-        ]
-      },
-    ]
-  },
+  }
 ];
 
 // ── State ─────────────────────────────────────────────────────────────
