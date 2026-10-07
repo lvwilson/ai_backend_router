@@ -11,6 +11,7 @@ Routes:
   POST /v1/translate             → CrispASR                     [passthrough]
   GET  /v1/voices                → CrispASR                     [passthrough]
   POST /v1/images/generations    → ComfyUI                      [translated]
+  POST /v1/images/generations/augmented → LLM + ComfyUI        [augmented pipeline]
   POST /v1/music/generations     → ComfyUI                      [translated]
   POST /v1/videos/generations    → ComfyUI                      [translated, raw]
   POST /v1/videos/generations/augmented → LLM + ComfyUI        [augmented pipeline]
@@ -272,17 +273,22 @@ def create_app(config: RouterConfig) -> FastAPI:
 
     # ── Image route (translated) ─────────────────────────────────────────
 
-    @app.post("/v1/images/generations")
-    async def images(request: Request):
-        try:
-            req = await request.json()
-        except json.JSONDecodeError:
-            return error(400, "Invalid JSON body")
+    # The image prompt-writing guide — read once at startup.
+    _IMAGE_GUIDE_PATH = Path(__file__).parent / "untracked" / "image_prompt_guide.md"
+    _IMAGE_GUIDE = _IMAGE_GUIDE_PATH.read_text() if _IMAGE_GUIDE_PATH.exists() else ""
 
-        prompt = req.get("prompt")
-        if not prompt:
-            return error(400, "Missing required field: prompt")
+    async def _do_image_generation(
+        req: dict,
+        prompt: str,
+        augmented_prompt: str | None = None,
+    ) -> JSONResponse:
+        """Core image generation: inject params, run the ComfyUI workflow, return response.
 
+        `augmented_prompt` is the LLM-rewritten description sent to the model
+        (augmented route only); it is echoed back in the response so callers
+        can see what the image model actually received. The raw route passes
+        the user's prompt verbatim; the augmented route passes the rewrite.
+        """
         try:
             img_model = config.resolve_image_model(req.get("model"))
         except KeyError as exc:
@@ -336,7 +342,102 @@ def create_app(config: RouterConfig) -> FastAPI:
             results,
             created=int(time.time()),
             response_format=req.get("response_format", "path"),
+            augmented_prompt=augmented_prompt,
         )
+
+    @app.post("/v1/images/generations")
+    async def images(request: Request):
+        """Raw image generation — prompt sent directly to ComfyUI (no LLM augmentation)."""
+        try:
+            req = await request.json()
+        except json.JSONDecodeError:
+            return error(400, "Invalid JSON body")
+
+        prompt = req.get("prompt")
+        if not prompt:
+            return error(400, "Missing required field: prompt")
+
+        return await _do_image_generation(req, prompt)
+
+    @app.post("/v1/images/generations/augmented")
+    async def images_augmented(request: Request):
+        """
+        Augmented image generation — prompt first enriched by an LLM call
+        (qwen3.6-27b-instruct) using the image prompt-writing guide, then
+        sent to ComfyUI for generation. The rewritten description is echoed
+        back in the response as `augmented_prompt`.
+        """
+        try:
+            req = await request.json()
+        except json.JSONDecodeError:
+            return error(400, "Invalid JSON body")
+
+        prompt = req.get("prompt")
+        if not prompt:
+            return error(400, "Missing required field: prompt")
+
+        try:
+            img_model = config.resolve_image_model(req.get("model"))
+        except KeyError as exc:
+            return error(400, str(exc))
+
+        # ── Augment via LLM ──────────────────────────────────────────────
+        augment_backend = "qwen3.6-27b-instruct"
+
+        system_msg = (
+            f"You are an image prompt engineer. Rewrite the user's brief idea into a "
+            f"detailed, creative positive prompt for the {img_model.name} image model. "
+            f"Follow the guide below exactly.\n\n"
+            f"## Image Prompt Writing Guide\n\n"
+            f"{_IMAGE_GUIDE}\n\n"
+            f"## Instructions\n\n"
+            f"- Produce a highly detailed, vivid, well-structured prompt.\n"
+            f"- Use temperature 1.0 — be creative and imaginative.\n"
+            f"- Output ONLY the final positive prompt. Do not include any "
+            f"explanation, negative-prompt text, or markdown wrapping.\n"
+        )
+
+        llm_request = {
+            "model": augment_backend,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": f"Create an image from this idea:\n\n{prompt}"},
+            ],
+            "temperature": 1.0,
+            "max_tokens": 1024,
+        }
+
+        # Hold the LLM backend's concurrency-1 slot for the augmentation call
+        # so a second augmented request queues behind this one instead of
+        # evicting the LLM backend mid-generation.
+        async with orch.request_slot(augment_backend):
+            try:
+                loader = await orch.ensure_running(augment_backend)
+            except InsufficientVRAMError as exc:
+                return error(507, str(exc))
+            except (KeyError, RuntimeError) as exc:
+                return error(503, str(exc))
+
+            llm_port = loader.config.port
+            llm_url = f"http://127.0.0.1:{llm_port}/v1/chat/completions"
+            http: aiohttp.ClientSession = app.state.http
+
+            try:
+                async with http.post(llm_url, json=llm_request) as llm_resp:
+                    llm_body = await llm_resp.json()
+                    if llm_resp.status != 200:
+                        return error(502, f"Prompt augmentation failed: {llm_body}")
+                    augmented_prompt = llm_body.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    if not augmented_prompt:
+                        return error(502, "Prompt augmentation returned empty response")
+            except aiohttp.ClientError as exc:
+                return error(503, f"LLM backend unreachable for prompt augmentation: {exc}")
+
+        logger.info("Augmented image prompt (%d chars): %.200s…", len(augmented_prompt), augmented_prompt)
+
+        # Echo the LLM's description back in the response so callers can see
+        # exactly what the image model received instead of their raw idea.
+        return await _do_image_generation(req, augmented_prompt, augmented_prompt=augmented_prompt)
 
     # ── Music route (translated) ─────────────────────────────────────────
 
@@ -768,19 +869,40 @@ def create_app(config: RouterConfig) -> FastAPI:
             return JSONResponse(content={"b64_json": data, "content_type": ct})
 
         decoded = urllib.parse.unquote(file_path)
+        name = Path(decoded).name  # bare filename ("" for absolute dirs only)
         logger.debug("file_data: file_path=%r, decoded=%r", file_path, decoded)
-        logger.debug("file_data: comfyui_output_dirs=%s", list(config.comfyui_output_dirs.values()))
         # Try as absolute path first
         abs_path = Path(decoded)
-        logger.debug("file_data: abs_path=%s, exists=%s", abs_path, abs_path.is_file())
         if abs_path.is_file():
             return _serve(abs_path)
-        # Search configured ComfyUI output dirs
+        # Deduplicate the configured output dirs (image + video backends may
+        # point at the same directory) so we only walk each tree once.
+        out_dirs = []
         for output_dir in config.comfyui_output_dirs.values():
+            if output_dir not in out_dirs:
+                out_dirs.append(output_dir)
+        # Search configured ComfyUI output dirs (top-level / relative subpath)
+        for output_dir in out_dirs:
             for candidate in (Path(output_dir) / decoded, Path(output_dir) / file_path):
-                logger.debug("file_data: candidate=%s, exists=%s", candidate, candidate.is_file())
                 if candidate.is_file():
                     return _serve(candidate)
+        # Fallback: the file may live in a sub-folder the caller's path didn't
+        # include — ComfyUI writes videos to output/video/<…> and older files to
+        # dated output/video/<YYYY-MM-DD>/ folders — so a bare filename (or a
+        # path missing that subfolder) 404s without a recursive search. Find the
+        # bare filename under the output dirs and serve the newest match.
+        if name:
+            matches = []
+            for output_dir in out_dirs:
+                odir = Path(output_dir)
+                if odir.is_dir():
+                    matches.extend(p for p in odir.rglob(name) if p.is_file())
+            if matches:
+                # Deduplicate by resolved path, then serve the most recent.
+                unique = {p.resolve(): p for p in matches}
+                newest = max(unique.values(), key=lambda p: p.stat().st_mtime)
+                logger.debug("file_data: rglob 'name' matched %d, serving newest=%s", len(unique), newest)
+                return _serve(newest)
         return error(404, f"File not found: {decoded}")
 
     @app.get("/v1/models")

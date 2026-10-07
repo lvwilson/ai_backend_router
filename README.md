@@ -79,14 +79,43 @@ curl http://localhost:8000/v1/chat/completions \
     "messages": [{"role": "user", "content": "Hello"}]
   }'
 
-# Image generation — launches ComfyUI, translates to workflow
+# Image generation — two pathways
+# Models: krea2 | wai_illustrious
+#
+# Raw — your prompt goes straight to the model (no LLM rewrite):
 curl http://localhost:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -d '{
     "model": "krea2",
-    "prompt": "A cat in a spacesuit",
+    "prompt": "A cat in a spacesuit, photorealistic, studio lighting",
     "size": "1024x1024"
   }'
+
+# Augmented — an LLM first rewrites your brief idea into a detailed positive
+# prompt (using the image prompt-writing guide), then the rewritten prompt is
+# sent to the model. The rewritten prompt is echoed back in the response as
+# `augmented_prompt`:
+curl http://localhost:8000/v1/images/generations/augmented \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "krea2",
+    "prompt": "a cat in a spacesuit",
+    "size": "1024x1024"
+  }'
+
+Image parameters (both pathways):
+  • model           — krea2 | wai_illustrious
+  • prompt          — Full model prompt (raw) or a brief idea (augmented)
+  • negative_prompt — Optional negative prompt (applies to both pathways;
+                      omitted → the workflow template's own default)
+  • size            — WIDTHxHEIGHT (e.g. "1024x1024")
+  • n               — Number of images (default 1)
+  • steps / cfg     — Optional sampler overrides
+  • seed            — -1 for random, or a specific integer
+
+Response shape:
+  Raw       → { "created": <int>, "data": [ { "path": "...png", "comfyui": {…} } ] }
+  Augmented → same, plus "augmented_prompt": "<the LLM's rewritten prompt>"
 
 # Music generation — launches ComfyUI, translates to the model's workflow
 # Models: ace_step_1.5_xl_turbo (28 GB) | minimax_music_3 (25 GB)

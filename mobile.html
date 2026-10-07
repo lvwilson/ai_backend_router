@@ -433,6 +433,17 @@ const ENDPOINTS = [
           { name: "seed", type: "number", label: "Seed (-1=random)", default: "" },
         ]
       },
+      {
+        id: "image-augmented", method: "POST", path: "/v1/images/generations/augmented",
+        desc: "Generate images (LLM-augmented)",
+        fields: [
+          { name: "model", type: "select", label: "Model", options: "image", default: "krea2" },
+          { name: "prompt", type: "textarea", label: "Brief Idea", default: "cat in a spacesuit" },
+          { name: "size", type: "text", label: "Size", default: "512x512" },
+          { name: "n", type: "number", label: "Count", default: 1 },
+          { name: "seed", type: "number", label: "Seed (-1=random)", default: "" },
+        ]
+      },
     ]
   },
   {
@@ -864,7 +875,12 @@ async function showResponse(r, elapsed, statusEl, metaEl, bodyEl, base) {
   if (ct.includes("json")) {
     const d = await r.json();
     if (Array.isArray(d.data) && d.data.length > 0 && (d.data[0].path || d.data[0].b64_json)) {
-      bodyEl.innerHTML = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} image(s) — loading…</div>`;
+      let html = `<div style="margin-bottom:8px;font-size:12px;color:var(--green);">${d.data.length} image(s) — loading…</div>`;
+      const desc = (typeof d.augmented_prompt === "string") ? d.augmented_prompt.trim() : "";
+      if (desc) {
+        html += `<div style="margin-bottom:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);padding:10px 12px;"><div style="font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:0.4px;">LLM Description — sent to the image model</div><pre style="margin:6px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.5;font-family:inherit;color:var(--text);">${escHtml(desc)}</pre></div>`;
+      }
+      bodyEl.innerHTML = html;
       for (const item of d.data) {
         const div = document.createElement("div"); div.style.marginTop = "12px";
         if (item.b64_json) {

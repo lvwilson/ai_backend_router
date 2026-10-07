@@ -601,6 +601,7 @@ def build_openai_response(
     images: list[dict[str, Any]],
     created: int,
     response_format: str = "path",
+    augmented_prompt: str | None = None,
 ) -> dict[str, Any]:
     """
     Build an OpenAI /v1/images/generations style response.
@@ -608,6 +609,11 @@ def build_openai_response(
     Each data item always includes the local `path` where ComfyUI saved the
     image. When response_format='b64_json' and the file is readable, the
     base64 payload is included as well.
+
+    `augmented_prompt` is the description produced by the LLM augmentation
+    step (the /v1/images/generations/augmented endpoint); when provided it
+    is echoed back as the top-level `augmented_prompt` field so callers can
+    see exactly what the image model received instead of their raw idea.
     """
     data = []
     for img in images:
@@ -621,4 +627,7 @@ def build_openai_response(
                 logger.warning("Could not read image %s for b64: %s", img["path"], exc)
         item["comfyui"] = {k: img[k] for k in ("filename", "subfolder", "type") if k in img}
         data.append(item)
-    return {"created": created, "data": data}
+    resp: dict[str, Any] = {"created": created, "data": data}
+    if augmented_prompt is not None:
+        resp["augmented_prompt"] = augmented_prompt
+    return resp
