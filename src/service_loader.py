@@ -485,8 +485,19 @@ class ServiceLoader:
         Returns True if the service is running and healthy, False otherwise.
         """
         if self._state in (ServiceState.RUNNING, ServiceState.STARTING):
-            logger.info("[%s] Already %s, skipping start", self.config.name, self._state.value)
-            return self._state == ServiceState.RUNNING
+            if self.is_alive:
+                logger.info("[%s] Already %s, skipping start", self.config.name, self._state.value)
+                return self._state == ServiceState.RUNNING
+            # Stale state: marked RUNNING/STARTING but the process is dead
+            # (e.g. it exited silently while the router was busy elsewhere).
+            # Without this check start() would report the dead backend as
+            # running and every proxied request would 503 (connect refused).
+            logger.warning(
+                "[%s] State %s but process is dead (stale) — resetting to DEAD and relaunching",
+                self.config.name, self._state.value,
+            )
+            self._state = ServiceState.DEAD
+            self.reset_vram_tracking()
 
         # Kill any stale OS process before launching a new one.
         # This prevents VRAM leaks when a previous stop/kill didn't fully
