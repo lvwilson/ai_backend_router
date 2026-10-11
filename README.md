@@ -70,6 +70,14 @@ The router starts on the configured host/port (default `0.0.0.0:8000`).
 
 All requests go through the router. Backends launch automatically on first request:
 
+For `/v1/chat/completions` and `/v1/messages`, model names match
+case-insensitively. A unique match ignoring separators (`-`, `_`, `.`, spaces)
+also works: e.g. `qwen-3.8-27b` selects `qwen3.8-27b`. Other unknown or ambiguous
+names fall back to **`qwen3.8-27b`**; it must be configured as a chat backend,
+otherwise the request returns 400. Substituted names are rewritten in the upstream
+payload. Omitting `model` still selects the first configured chat backend.
+Embedding, audio, image, music, and video routing is unchanged.
+
 ```bash
 # Chat completion — launches llama.cpp on first call
 curl http://localhost:8000/v1/chat/completions \

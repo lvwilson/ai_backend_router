@@ -83,17 +83,34 @@ class RouterConfig:
     backend_ports: dict[str, int] = field(default_factory=dict)
 
     def resolve_llama(self, model: str | None) -> str:
-        """Map a request's `model` field to a llama backend name (case-insensitive)."""
-        if model is not None:
-            model_lower = model.lower()
-            for backend in self.llama_backends:
-                if backend.lower() == model_lower:
-                    return backend
+        """Resolve exact names, unique separator near misses, then the chat fallback."""
         if not self.llama_backends:
             raise KeyError("No llama backends configured")
-        if model is not None:
-            raise KeyError(f"Unknown model '{model}' — available: {', '.join(self.llama_backends)}")
-        return self.llama_backends[0]  # Default when model field is omitted
+        if model is None:
+            return self.llama_backends[0]  # Preserve the omitted-model default
+
+        model_lower = model.lower()
+        for backend in self.llama_backends:
+            if backend.lower() == model_lower:
+                return backend
+
+        # Only tolerate separator differences, not changed versions/sizes or
+        # arbitrary fuzzy matches. Ambiguous normalized names are not guessed.
+        separators = str.maketrans("", "", "-_. ")
+        normalized = model_lower.translate(separators)
+        matches = [
+            backend for backend in self.llama_backends
+            if backend.lower().translate(separators) == normalized
+        ]
+        if len(matches) == 1:
+            return matches[0]
+
+        for backend in self.llama_backends:
+            if backend.lower() == "qwen3.8-27b":
+                return backend
+        raise KeyError(
+            f"Unknown model '{model}' — fallback 'qwen3.8-27b' is not configured"
+        )
 
     def resolve_audio(self, model: str | None) -> str:
         """Map a request's `model` field to a crispasr backend name (case-insensitive)."""

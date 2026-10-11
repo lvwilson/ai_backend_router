@@ -211,6 +211,11 @@ def create_app(config: RouterConfig) -> FastAPI:
             backend = config.resolve_llama(model)
         except KeyError as exc:
             return error(400, str(exc))
+        if model is not None and model != backend:
+            logger.info("LLM route: model=%r → backend=%s", model, backend)
+            payload = json.loads(body)
+            payload["model"] = backend
+            body = json.dumps(payload).encode("utf-8")
         return await proxy(request, backend, body)
 
     # ── Embedding routes (passthrough, routed by model) ──────────────────

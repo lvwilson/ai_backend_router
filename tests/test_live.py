@@ -341,13 +341,16 @@ class TestLiveEndpoints:
         assert len(audios) > 0, f"no audio in response: {data}"
         assert "path" in audios[0], f"no path in audio record: {audios[0]}"
 
-    def test_error_unknown_model(self, live_client):
-        """Error handling — unknown model returns 400."""
-        payload = {"model": "nonexistent-model", "messages": [{"role": "user", "content": "hi"}]}
+    def test_unknown_model_falls_back(self, live_client):
+        """Unknown chat models route to qwen3.8-27b."""
+        payload = {
+            "model": "nonexistent-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 8,
+        }
         r = live_client.post("/v1/chat/completions", json=payload)
-        assert r.status_code == 400, f"status={r.status_code}"
-        data = r.json()
-        assert "error" in data
+        assert r.status_code == 200, r.text
+        assert "choices" in r.json()
 
     def test_error_missing_prompt(self, live_client):
         """Error handling — missing prompt on image gen returns 400."""
