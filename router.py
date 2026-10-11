@@ -17,6 +17,11 @@ Routes:
   POST /v1/videos/generations/augmented → LLM + ComfyUI        [augmented pipeline]
   GET  /v1/models                → router-level model list
   GET  /status                   → orchestrator fleet status
+  POST /v1/models/unload-all     → drain requests and stop managed backends
+  POST /v1/process-guards        → register external PID (optional timeout)
+  GET  /v1/process-guards        → list registrations and admission status
+  DELETE /v1/process-guards/{pid} → unregister without killing
+  POST /v1/process-guards/{pid}/kill → kill registered process only
 
 Backends are launched on demand via the Orchestrator (warm-by-default,
 VRAM-pressure eviction) and requests are forwarded once healthy.
@@ -40,6 +45,7 @@ import aiohttp
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.comfyui import (
     ComfyUIClient,
@@ -54,8 +60,16 @@ from src.comfyui import (
 )
 from src.config import RouterConfig, load_config
 from src.orchestrator import InsufficientVRAMError, Orchestrator
+from src.process_guard import ProcessGuardError
 
 logger = logging.getLogger("router")
+
+
+class ProcessGuardRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    pid: int = Field(strict=True, gt=1)
+    timeout: float | None = Field(default=None, strict=True, gt=0, allow_inf_nan=False)
+
 
 # Hop-by-hop headers that must not be forwarded either direction.
 HOP_HEADERS = {
@@ -126,6 +140,10 @@ def create_app(config: RouterConfig) -> FastAPI:
         logger.error("Unhandled exception on %s %s:\n%s", request.method, request.url.path, traceback.format_exc())
         return error(500, f"Internal server error: {exc}")
 
+    @app.exception_handler(ProcessGuardError)
+    async def process_guard_error(request: Request, exc: ProcessGuardError):
+        return error(exc.status, str(exc))
+
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def error(status: int, message: str) -> JSONResponse:
@@ -155,6 +173,9 @@ def create_app(config: RouterConfig) -> FastAPI:
             logger.error("[%s] Backend error: %s", backend_name, exc)
             await orch.release_slot(backend_name)
             return error(503, str(exc))
+        except BaseException:
+            await orch.release_slot(backend_name)
+            raise
 
         try:
             port = loader.config.port
@@ -171,6 +192,9 @@ def create_app(config: RouterConfig) -> FastAPI:
             logger.error("[%s] Backend request failed: %s", backend_name, exc)
             await orch.release_slot(backend_name)
             return error(503, f"Backend '{backend_name}' unreachable: {exc}")
+        except asyncio.CancelledError:
+            await orch.release_slot(backend_name)
+            raise
         except Exception as exc:
             # Any unexpected setup failure — release the slot so this backend
             # is not wedged, then surface a 500.
@@ -926,12 +950,34 @@ def create_app(config: RouterConfig) -> FastAPI:
 
     @app.post("/v1/models/unload-all")
     async def unload_all():
-        """Unload all running backends. Useful for test teardown."""
-        running = orch._running()
-        if running:
-            logger.info("Unload-all: stopping %d backend(s)", len(running))
-            await asyncio.gather(*(s.stop() for s in running))
-        return {"unloaded": [s.config.name for s in running]}
+        """Drain in-flight model requests, then unload all managed backends."""
+        try:
+            return {"unloaded": await orch.unload_all()}
+        except RuntimeError as exc:
+            return error(503, str(exc))
+
+    @app.post("/v1/process-guards", status_code=201)
+    async def register_process_guard(req: ProcessGuardRequest):
+        """Block new model work while an external PID runs (or until timeout)."""
+        return orch.process_guards.register(req.pid, req.timeout)
+
+    @app.get("/v1/process-guards")
+    async def list_process_guards():
+        return {
+            "process_guards": orch.process_guards.snapshots(),
+            "requests_blocked": bool(orch._unloading or orch.process_guards.blocking),
+            "busy_backends": orch.busy_backends(),
+        }
+
+    @app.delete("/v1/process-guards/{pid}")
+    async def unregister_process_guard(pid: int):
+        """Release a registration without terminating the process."""
+        return await orch.process_guards.unregister(pid)
+
+    @app.post("/v1/process-guards/{pid}/kill")
+    async def kill_registered_process(pid: int):
+        """SIGKILL only this registered process; confirm exit before releasing."""
+        return await orch.process_guards.kill(pid)
 
     @app.post("/v1/models/restart-router")
     async def restart_router():

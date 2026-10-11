@@ -46,6 +46,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+from .process_guard import ProcessGuards
 from .service_loader import (
     EventCallback,
     ServiceConfig,
@@ -172,6 +173,9 @@ class Orchestrator:
         self._backend_slots: dict[str, asyncio.Semaphore] = {}
         self._busy: set[str] = set()
         self._busy_cond = asyncio.Condition()
+        self._slot_owners: dict[str, asyncio.Task] = {}
+        self._unloading = 0
+        self.process_guards = ProcessGuards(self._busy_cond, self._managed_pids)
         # Extra VRAM attributed beyond the process itself — e.g. the model a
         # warm ComfyUI instance currently holds resident (loaded on demand).
         self._extra_vram: dict[str, float] = {}
@@ -217,14 +221,24 @@ class Orchestrator:
         Waits until no other request is in flight on this backend. The busy
         mark is what stops _make_room from evicting this backend mid-request.
         """
-        await self._slot_for(name).acquire()
-        async with self._busy_cond:
-            self._busy.add(name)
+        slot = self._slot_for(name)
+        await slot.acquire()
+        try:
+            async with self._busy_cond:
+                await self._busy_cond.wait_for(
+                    lambda: not self._unloading and not self.process_guards.blocking
+                )
+                self._busy.add(name)
+                self._slot_owners[name] = asyncio.current_task()
+        except BaseException:
+            slot.release()
+            raise
 
     async def release_slot(self, name: str) -> None:
         """Clear the busy mark and release the backend's concurrency slot."""
         async with self._busy_cond:
             self._busy.discard(name)
+            self._slot_owners.pop(name, None)
             self._busy_cond.notify_all()
         self._slot_for(name).release()
 
@@ -323,6 +337,12 @@ class Orchestrator:
             InsufficientVRAMError: backend cannot fit even after evictions.
             RuntimeError: launch failed after retries.
         """
+        # Direct callers also pass admission, holding a slot for startup.
+        # HTTP routes already own their slot for the entire generation.
+        if self._slot_owners.get(name) is not asyncio.current_task():
+            async with self.request_slot(name):
+                return await self.ensure_running(name, extra_vram_gb)
+
         loader = self.services[name]
         is_cpu = loader.config.expected_ram_gb > 0 and loader.config.expected_vram_gb == 0
 
@@ -605,7 +625,7 @@ class Orchestrator:
         hogs: list[tuple[int, float, str]] = []
 
         for pid, gb, name in named:
-            if pid in managed_pids:
+            if pid in managed_pids or pid in self.process_guards.pids:
                 continue
             if self._is_default_app(name):
                 continue
@@ -635,6 +655,11 @@ class Orchestrator:
         for pid, gb, name in hogs:
             if target_gb is not None and freed >= target_gb:
                 break
+
+            # Recheck after telemetry awaits: a guard may have just registered.
+            # The legacy killer signals groups, so protect group peers too.
+            if self.process_guards.protects_group(pid):
+                continue
 
             logger.info(
                 "VRAM hog: killing '%s' (PID %d, %.1f GB)",
@@ -758,6 +783,9 @@ class Orchestrator:
             "vram_reserve_gb": self.vram_reserve_gb,
             "available_vram_gb": round(await self.available_vram_gb(), 2),
             "busy_backends": self.busy_backends(),
+            "unloading": bool(self._unloading),
+            "requests_blocked": bool(self._unloading or self.process_guards.blocking),
+            "process_guards": self.process_guards.snapshots(),
             "vram_hogs": [
                 {"pid": pid, "vram_gb": round(gb, 2), "name": name}
                 for pid, gb, name in hogs
@@ -767,9 +795,64 @@ class Orchestrator:
             },
         }
 
+    async def unload_all(self) -> list[str]:
+        """Block admission, drain active slots, then stop all managed backends.
+
+        Guards do not prevent unloading, and unloading never kills external
+        processes. Multiple unload callers keep admission closed until all finish.
+        """
+        async with self._busy_cond:
+            self._unloading += 1
+        try:
+            async with self._busy_cond:
+                await self._busy_cond.wait_for(lambda: not self._busy)
+            async with self._lock:
+                # Once stopping starts, finish cleanup even if the caller leaves.
+                task = asyncio.create_task(self._stop_all_for_unload())
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    await task
+                    raise
+        finally:
+            async with self._busy_cond:
+                self._unloading -= 1
+                self._busy_cond.notify_all()
+
+    async def _stop_all_for_unload(self) -> list[str]:
+        # Include stale live handles even if the loader state says DEAD.
+        running = [
+            s for s in self.services.values()
+            if s.is_alive or (s._process is not None and s._process.returncode is None)
+        ]
+        await asyncio.gather(*(s.save_slot_cache() for s in running))
+
+        async def stop(loader: ServiceLoader) -> bool:
+            if loader.is_alive:
+                return await loader.stop()
+            # stop()/kill() skip DEAD states, but this owned handle is live.
+            return await loader._force_kill()
+
+        results = await asyncio.gather(*(stop(s) for s in running), return_exceptions=True)
+        failed = [
+            s.config.name for s, result in zip(running, results)
+            if isinstance(result, BaseException) or not result
+            or (s._process is not None and s._process.returncode is None)
+        ]
+        for name, loader in self.services.items():
+            if name not in failed:
+                self._extra_vram.pop(name, None)
+                loader.reset_vram_tracking()
+        if failed:
+            raise RuntimeError(f"Failed to unload backends: {', '.join(failed)}")
+        unloaded = [s.config.name for s in running]
+        logger.info("Unload-all completed: %s", unloaded)
+        return unloaded
+
     async def shutdown(self) -> None:
         """Gracefully stop all running backends (router shutdown hook)."""
         await self.stop_vram_monitor()
+        await self.process_guards.close()
         running = self._running()
         if running:
             logger.info("Shutting down %d running backend(s)", len(running))

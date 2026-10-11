@@ -251,3 +251,109 @@ config.py          — YAML config loader, per-type command builders
 - Python 3.11+
 - `nvidia-smi` available (for VRAM management; graceful fallback if absent)
 - Backend binaries in `PATH` or specified by absolute path in config
+
+## Model unloading and external-process guards
+
+These administration endpoints coordinate with **all routed model work**:
+chat/messages, embeddings, audio, image, music, and video. Read-only router
+endpoints (`/status`, `/v1/models`, file downloads, and the UI) remain available.
+
+### Unload all models
+
+```bash
+curl -X POST http://localhost:8000/v1/models/unload-all
+# {"unloaded":["qwen3.8-27b","image"]}
+```
+
+The router temporarily blocks new model work, waits for in-flight request slots
+(including streamed responses) to drain, saves supported llama slot caches,
+and stops its managed backend processes. This also releases models cached inside
+ComfyUI and clears their memory accounting. Already-unloaded backends are harmless:
+an idle fleet returns `{"unloaded":[]}`. Stop failures return HTTP 503 rather than
+claiming success. External programs and process-guard registrations are untouched.
+
+The operation waits rather than aborting generations; use a sufficiently long
+HTTP client timeout. New requests can load models again after unloading finishes,
+unless a process guard is still blocking them.
+
+### Register an external memory user
+
+```bash
+# Replace 12345 with the actual PID of your program.
+curl -X POST http://localhost:8000/v1/process-guards \
+  -H 'Content-Type: application/json' \
+  -d '{"pid":12345,"timeout":600}'
+```
+
+Returns HTTP 201, for example:
+
+```json
+{
+  "pid": 12345,
+  "name": "python",
+  "state": "active",
+  "blocking": true,
+  "registered_at": 1791700000.0,
+  "timeout": 600.0,
+  "expires_at": 1791700600.0
+}
+```
+
+- `pid` is required: an integer greater than 1 for an existing process owned by
+  the router's OS user. The router, its ancestors, and managed backends (including
+  their descendants) cannot be registered. Linux pidfd support is required.
+- `timeout` is optional: a finite positive number of **seconds from registration**.
+  Omit it or use `null` to block until the process exits.
+- Registration returns immediately and blocks **new** model work across backends.
+  Existing requests finish normally; registration neither pauses your program
+  nor unloads resident models. Augmented pipelines may pause between their LLM
+  and image/video stages.
+- Natural exit (including a zombie awaiting reaping) automatically removes the
+  registration and wakes waiting requests, normally within 0.1 seconds.
+- Timeout changes the state to `timed_out` and releases its request block.
+  **It does not kill the program.** The registration remains visible and excluded
+  from automatic VRAM-hog killing until exit or explicit unregister. Such a process
+  can still consume memory, so requests are not guaranteed to fit after timeout.
+- Multiple registrations are supported; requests wait until **all** blocking
+  guards have exited, timed out, or been removed. Registering the same PID again
+  returns HTTP 409; unregister it first to replace its timeout.
+
+For exclusive memory access, start your worker **paused or waiting on a signal**,
+register its PID, then call unload-all and wait for the response before allowing
+the worker to allocate memory. This prevents new model work from entering the
+gap between unloading and registration. Choose a timeout long enough to include
+draining/unloading, or omit it. Registering an already-running worker cannot undo
+memory contention that has already occurred.
+
+### Inspect, release, or kill a registration
+
+```bash
+# List registrations, whether new work is blocked, and in-flight backends.
+curl http://localhost:8000/v1/process-guards
+
+# Release the registration WITHOUT killing the program.
+curl -X DELETE http://localhost:8000/v1/process-guards/12345
+
+# Explicitly SIGKILL a registered program (including a timed-out registration).
+curl -X POST http://localhost:8000/v1/process-guards/12345/kill
+# {"pid":12345,"killed":true}
+```
+
+The kill endpoint uses the registered **pidfd**, not a numeric-PID signal, so it
+cannot accidentally signal a different process after PID reuse. It kills only
+that process, **not its process group or descendants**; register each actual
+memory-holding worker if your program forks. Requests remain blocked until exit
+is confirmed. If confirmation takes longer than five seconds, HTTP 504 is
+returned and the guard stays in `killing` state until exit. Unknown registrations
+return 404, forbidden ownership returns 403, and invalid registration bodies
+return 422.
+
+`GET /status` also includes `process_guards`, `requests_blocked`, and `unloading`;
+`busy_backends` continues to describe actual in-flight managed-backend work.
+Registrations are in memory only: a router restart removes them without killing
+external processes, so re-register still-running programs after a restart.
+
+**Security:** Like the existing unload/restart/hog-kill APIs, these endpoints are
+administrative and have no built-in authentication. Keep the router on a trusted
+network or protect it with an authenticated reverse proxy. A caller can otherwise
+block model access or register and kill programs belonging to the router's user.
